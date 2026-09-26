@@ -710,6 +710,42 @@ pub fn process_cwd(pid: u32) -> Option<PathBuf> {
     std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
 }
 
+pub(crate) fn process_instance(pid: u32) -> Option<super::ProcessInstance> {
+    Some(hook_process(pid)?.instance)
+}
+
+pub(crate) fn codex_hook_process_chain(
+    reporter_pid: u32,
+    shell_pid: u32,
+) -> Option<Vec<super::HookProcess>> {
+    // /proc/<pid>/cmdline may block indefinitely for a dying process on WSL.
+    if running_inside_wsl() {
+        return None;
+    }
+    super::codex_hook_process_chain_with(reporter_pid, shell_pid, hook_process)
+}
+
+fn hook_process(pid: u32) -> Option<super::HookProcess> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let open = stat.find('(')?;
+    let close = stat.rfind(')')?;
+    let name = stat.get(open + 1..close)?.to_string();
+    let rest: Vec<&str> = stat.get(close + 2..)?.split_whitespace().collect();
+    let parent_pid = rest.get(1)?.parse().ok()?;
+    let started = rest.get(19)?.parse().ok()?;
+    let argv = if name == "codex" {
+        process_argv(pid)
+    } else {
+        None
+    };
+    Some(super::HookProcess {
+        instance: super::ProcessInstance { pid, started },
+        parent_pid,
+        name,
+        argv,
+    })
+}
+
 /// Read a Herdr agent identity hint from a process environment.
 pub fn process_agent_hint(pid: u32) -> Option<crate::detect::Agent> {
     if pid == 0 {

@@ -390,6 +390,14 @@ pub struct PaneReportAgentSessionParams {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PaneReportCodexSessionParams {
+    pub pane_id: String,
+    pub agent_session_id: String,
+    pub session_start_source: String,
+    pub reporter_pid: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PaneReportMetadataParams {
     pub pane_id: String,
     pub source: String,

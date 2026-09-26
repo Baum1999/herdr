@@ -1,20 +1,20 @@
 use bytes::Bytes;
 
 use crate::api::schema::{
-    EventData, EventEnvelope, EventKind, PaneClearAgentAuthorityParams, PaneCopyMotion,
-    PaneCopyMotionParams, PaneCopySearchDirection, PaneCopySearchParams, PaneCurrentParams,
-    PaneDirection, PaneEdgesParams, PaneEdgesResult, PaneFocusDirectionParams,
+    CodexSessionReportStatus, EventData, EventEnvelope, EventKind, PaneClearAgentAuthorityParams,
+    PaneCopyMotion, PaneCopyMotionParams, PaneCopySearchDirection, PaneCopySearchParams,
+    PaneCurrentParams, PaneDirection, PaneEdgesParams, PaneEdgesResult, PaneFocusDirectionParams,
     PaneFocusDirectionReason, PaneFocusDirectionResult, PaneInfo, PaneInputSetParams,
     PaneLayoutPane, PaneLayoutParams, PaneLayoutRect, PaneLayoutSnapshot, PaneLayoutSplit,
     PaneListParams, PaneMoveDestination, PaneMoveParams, PaneMoveReason, PaneMoveResult,
     PaneNeighborParams, PaneNeighborResult, PaneProcessInfo, PaneProcessInfoParams,
     PaneProcessInfoProcess, PaneReadParams, PaneReadResult, PaneReleaseAgentParams,
     PaneRenameParams, PaneReportAgentParams, PaneReportAgentSessionParams,
-    PaneReportMetadataParams, PaneResizeParams, PaneResizeReason, PaneResizeResult,
-    PaneScrollParams, PaneSelectionReadParams, PaneSendInputParams, PaneSendKeysParams,
-    PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneSwapReason, PaneSwapResult,
-    PaneTarget, PaneTextPoint, PaneTextRange, PaneZoomMode, PaneZoomParams, PaneZoomReason,
-    PaneZoomResult, ResponseResult,
+    PaneReportCodexSessionParams, PaneReportMetadataParams, PaneResizeParams, PaneResizeReason,
+    PaneResizeResult, PaneScrollParams, PaneSelectionReadParams, PaneSendInputParams,
+    PaneSendKeysParams, PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneSwapReason,
+    PaneSwapResult, PaneTarget, PaneTextPoint, PaneTextRange, PaneZoomMode, PaneZoomParams,
+    PaneZoomReason, PaneZoomResult, ResponseResult,
 };
 use crate::app::actions::{PaneZoomCommand, PaneZoomNoopReason};
 use crate::app::App;
@@ -1555,6 +1555,13 @@ impl App {
         let Some(agent_label) = normalize_reported_agent_label(&params.agent) else {
             return invalid_agent(id);
         };
+        if params.source == "herdr:codex" && agent_label == "codex" {
+            return encode_error(
+                id,
+                "codex_report_unverified",
+                "Codex session reports require local ownership verification",
+            );
+        }
         self.handle_internal_event(crate::events::AppEvent::HookStateReported {
             pane_id,
             session_ref: crate::agent_resume::session_ref_from_report(
@@ -1584,6 +1591,13 @@ impl App {
         let Some(agent_label) = normalize_reported_agent_label(&params.agent) else {
             return invalid_agent(id);
         };
+        if params.source == "herdr:codex" && agent_label == "codex" {
+            return encode_error(
+                id,
+                "codex_report_unverified",
+                "Codex session reports require local ownership verification",
+            );
+        }
         self.handle_internal_event(crate::events::AppEvent::AgentSessionReported {
             pane_id,
             session_ref: crate::agent_resume::session_ref_from_report(
@@ -1601,6 +1615,73 @@ impl App {
         });
 
         encode_success(id, ResponseResult::Ok {})
+    }
+
+    pub(super) fn handle_pane_report_codex_session(
+        &mut self,
+        id: String,
+        params: PaneReportCodexSessionParams,
+    ) -> String {
+        let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
+            return pane_not_found(id, &params.pane_id);
+        };
+        let Some(session_ref) = crate::agent_resume::AgentSessionRef::id(params.agent_session_id)
+        else {
+            return encode_error(id, "invalid_agent_session", "Invalid Codex session ID");
+        };
+        if !matches!(
+            params.session_start_source.as_str(),
+            "startup" | "resume" | "clear" | "compact"
+        ) {
+            return encode_error(
+                id,
+                "invalid_session_start",
+                "Invalid Codex session start source",
+            );
+        }
+        let Some(shell_pid) = self
+            .lookup_runtime(ws_idx, pane_id)
+            .and_then(|(runtime, _)| runtime.child_pid())
+        else {
+            return encode_error(id, "pane_unavailable", "Pane runtime is unavailable");
+        };
+        let Some(owner) = crate::platform::codex_hook_owner(shell_pid, params.reporter_pid) else {
+            return encode_success(
+                id,
+                ResponseResult::CodexSessionReport {
+                    status: CodexSessionReportStatus::Rejected,
+                },
+            );
+        };
+        let previous_toast = self.state.toast.clone();
+        let (disposition, update) = self.state.report_verified_codex_session(
+            pane_id,
+            owner,
+            session_ref,
+            &params.session_start_source,
+        );
+        if let Some(update) = update {
+            self.refresh_new_herdr_toast_context_for_update(&update, &previous_toast);
+            self.emit_pane_state_update(&update);
+        }
+        self.sync_full_lifecycle_authority_detection_pauses();
+        self.sync_toast_deadline(previous_toast);
+        self.sync_session_save_schedule();
+        let status = match disposition {
+            crate::terminal::state::CodexSessionDisposition::Applied => {
+                CodexSessionReportStatus::Applied
+            }
+            crate::terminal::state::CodexSessionDisposition::Unchanged => {
+                CodexSessionReportStatus::Unchanged
+            }
+            crate::terminal::state::CodexSessionDisposition::Invalidated => {
+                CodexSessionReportStatus::Invalidated
+            }
+            crate::terminal::state::CodexSessionDisposition::Rejected => {
+                CodexSessionReportStatus::Rejected
+            }
+        };
+        encode_success(id, ResponseResult::CodexSessionReport { status })
     }
 
     pub(super) fn handle_pane_report_metadata(
@@ -2238,6 +2319,78 @@ mod tests {
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
         let public_pane_id = app.public_pane_id(0, pane_id).unwrap();
         (app, public_pane_id)
+    }
+
+    #[test]
+    fn legacy_codex_session_methods_reject_before_mutation() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let session = crate::api::schema::PaneReportAgentSessionParams {
+            pane_id: pane_id.clone(),
+            source: "herdr:codex".into(),
+            agent: "codex".into(),
+            seq: Some(999),
+            agent_session_id: Some("foreign-root".into()),
+            agent_session_path: None,
+            session_start_source: Some("startup".into()),
+        };
+        let response = app.handle_pane_report_agent_session("legacy".into(), session);
+        let error: ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "codex_report_unverified");
+
+        let response = app.handle_pane_report_agent(
+            "legacy-state".into(),
+            crate::api::schema::PaneReportAgentParams {
+                pane_id: pane_id.clone(),
+                source: "herdr:codex".into(),
+                agent: "codex".into(),
+                state: crate::api::schema::PaneAgentState::Working,
+                message: None,
+                seq: Some(1000),
+                agent_session_id: Some("foreign-root".into()),
+                agent_session_path: None,
+            },
+        );
+        let error: ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "codex_report_unverified");
+        let (_, internal) = app.parse_pane_id(&pane_id).unwrap();
+        let terminal_id = app.state.workspaces[0].terminal_id(internal).unwrap();
+        assert!(app.state.terminals[terminal_id]
+            .persisted_agent_session
+            .is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn quarantined_codex_identity_disappears_from_api_and_saved_snapshot() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let (_, internal) = app.parse_pane_id(&pane_id).unwrap();
+        let terminal_id = app.state.workspaces[0]
+            .terminal_id(internal)
+            .unwrap()
+            .clone();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:codex".into(),
+            agent: "codex".into(),
+            session_ref: crate::agent_resume::AgentSessionRef::id("unsafe-root").unwrap(),
+        });
+        terminal.quarantine_codex_reports(None, None);
+        let response = app.handle_pane_get("get".into(), PaneTarget { pane_id });
+        let result: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::PaneInfo { pane } = result.result else {
+            panic!("expected pane info")
+        };
+        assert!(pane.agent_session.is_none());
+        let saved = crate::persist::capture(
+            &app.state.workspaces,
+            &app.state.terminals,
+            &app.terminal_runtimes,
+            Some(0),
+            0,
+        );
+        assert!(saved.workspaces[0].tabs[0].panes[&internal.raw()]
+            .agent_session
+            .is_none());
     }
 
     #[test]

@@ -1426,6 +1426,34 @@ pub fn process_cwd(pid: u32) -> Option<PathBuf> {
         .filter(|path| path.is_absolute())
 }
 
+pub(crate) fn process_instance(pid: u32) -> Option<super::ProcessInstance> {
+    let process = ProcessHandle::open(pid, PROCESS_QUERY_LIMITED_INFORMATION)?;
+    Some(super::ProcessInstance {
+        pid,
+        started: process_creation_time(process.0)?,
+    })
+}
+
+pub(crate) fn codex_hook_process_chain(
+    reporter_pid: u32,
+    shell_pid: u32,
+) -> Option<Vec<super::HookProcess>> {
+    let snapshot = ProcessSnapshot::new(snapshot_processes());
+    super::codex_hook_process_chain_with(reporter_pid, shell_pid, |pid| {
+        let entry = snapshot.entry(pid)?;
+        let command = entry.command();
+        Some(super::HookProcess {
+            instance: super::ProcessInstance {
+                pid,
+                started: command.creation_time?,
+            },
+            parent_pid: entry.parent_pid,
+            name: entry.name.clone(),
+            argv: command.argv.clone(),
+        })
+    })
+}
+
 fn select_pane_foreground_job_cached(shell_pid: u32) -> Option<ForegroundJob> {
     let snapshot = cached_foreground_processes();
     let (job, retry_with_fresh_snapshot) =

@@ -3,10 +3,10 @@ use crate::api::schema::{
     PaneFocusDirectionParams, PaneInputSetParams, PaneLayoutParams, PaneListParams,
     PaneMoveDestination, PaneMoveParams, PaneNeighborParams, PaneProcessInfoParams, PaneReadParams,
     PaneReleaseAgentParams, PaneRenameParams, PaneReportAgentParams, PaneReportAgentSessionParams,
-    PaneReportMetadataParams, PaneResizeParams, PaneRightClickTarget, PaneSendInputParams,
-    PaneSendKeysParams, PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneTarget,
-    PaneWaitForOutputParams, PaneZoomMode, PaneZoomParams, ReadFormat, ReadSource, Request,
-    SplitDirection,
+    PaneReportCodexSessionParams, PaneReportMetadataParams, PaneResizeParams, PaneRightClickTarget,
+    PaneSendInputParams, PaneSendKeysParams, PaneSendTextParams, PaneSplitParams, PaneSwapParams,
+    PaneTarget, PaneWaitForOutputParams, PaneZoomMode, PaneZoomParams, ReadFormat, ReadSource,
+    Request, SplitDirection,
 };
 
 pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
@@ -38,6 +38,7 @@ pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
         "wait-output" => pane_wait_output(&args[1..]),
         "report-agent" => pane_report_agent(&args[1..]),
         "report-agent-session" => pane_report_agent_session(&args[1..]),
+        "report-codex-session" => pane_report_codex_session(&args[1..]),
         "release-agent" => pane_release_agent(&args[1..]),
         "report-metadata" => pane_report_metadata(&args[1..]),
         "run" => pane_run(&args[1..]),
@@ -1402,6 +1403,60 @@ fn pane_report_agent_session(args: &[String]) -> std::io::Result<i32> {
     ))
 }
 
+fn pane_report_codex_session(args: &[String]) -> std::io::Result<i32> {
+    const USAGE: &str = "usage: herdr pane report-codex-session <pane_id> --agent-session-id ID --session-start-source SOURCE";
+    let Some(pane_id) = args.first().filter(|arg| !arg.starts_with('-')) else {
+        eprintln!("{USAGE}");
+        return Ok(2);
+    };
+    let mut session_id = None;
+    let mut source = None;
+    let mut pairs = args[1..].chunks_exact(2);
+    for pair in &mut pairs {
+        match pair[0].as_str() {
+            "--agent-session-id" => session_id = Some(pair[1].clone()),
+            "--session-start-source" => source = Some(pair[1].clone()),
+            other => {
+                eprintln!("unknown option: {other}");
+                return Ok(2);
+            }
+        }
+    }
+    if let Some(option) = pairs.remainder().first() {
+        eprintln!("missing value for {option}");
+        return Ok(2);
+    }
+    let (Some(agent_session_id), Some(session_start_source)) = (session_id, source) else {
+        eprintln!("{USAGE}");
+        return Ok(2);
+    };
+    let response = super::send_request(&Request {
+        id: "cli:codex-session".into(),
+        method: Method::PaneReportCodexSession(PaneReportCodexSessionParams {
+            pane_id: super::normalize_pane_id(pane_id),
+            agent_session_id,
+            session_start_source,
+            reporter_pid: std::process::id(),
+        }),
+    })?;
+    if response.get("error").is_some() {
+        println!("rejected");
+        return Ok(1);
+    }
+    let Some(status) = response
+        .get("result")
+        .and_then(|result| result.get("status"))
+        .and_then(serde_json::Value::as_str)
+    else {
+        return Ok(1);
+    };
+    if !matches!(status, "applied" | "unchanged" | "invalidated" | "rejected") {
+        return Ok(1);
+    }
+    println!("{status}");
+    Ok(i32::from(matches!(status, "invalidated" | "rejected")))
+}
+
 fn pane_release_agent(args: &[String]) -> std::io::Result<i32> {
     let Some(raw_pane_id) = args.first() else {
         eprintln!("usage: herdr pane release-agent <pane_id> --source ID --agent LABEL [--seq N]");
@@ -1689,6 +1744,7 @@ fn print_pane_help() {
     eprintln!("  herdr pane wait-output <pane_id> (--match TEXT | --regex PATTERN) [--source visible|recent|recent-unwrapped] [--lines N] [--timeout MS] [--raw]");
     eprintln!("  herdr pane report-agent <pane_id> --source ID --agent LABEL --state idle|working|blocked|unknown [--message TEXT] [--seq N] [--agent-session-id ID] [--agent-session-path PATH]");
     eprintln!("  herdr pane report-agent-session <pane_id> --source ID --agent LABEL [--seq N] [--agent-session-id ID] [--agent-session-path PATH]");
+    eprintln!("  herdr pane report-codex-session <pane_id> --agent-session-id ID --session-start-source SOURCE");
     eprintln!("  herdr pane release-agent <pane_id> --source ID --agent LABEL [--seq N]");
     eprintln!("  herdr pane report-metadata <pane_id> --source ID [--agent LABEL] [--applies-to-source ID] [--title TEXT|--clear-title] [--display-agent TEXT|--clear-display-agent] [--state-label STATUS=TEXT] [--clear-state-labels] [--token NAME=VALUE] [--clear-token NAME] [--seq N] [--ttl-ms N]");
     eprintln!("  herdr pane run <pane_id> <command>");

@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use interprocess::local_socket::traits::{ListenerExt as _, Stream as _};
+use interprocess::local_socket::traits::{ListenerExt as _, Stream as _, StreamCommon as _};
 use tracing::{debug, error, info, warn};
 
 #[cfg(all(test, unix))]
@@ -344,6 +344,22 @@ fn handle_connection_with_stop(
         }
     };
 
+    if let Method::PaneReportCodexSession(params) = &request.method {
+        let peer_pid = stream.peer_creds().ok().and_then(|creds| creds.pid());
+        #[cfg(unix)]
+        let peer_pid = peer_pid.and_then(|pid| u32::try_from(pid).ok());
+        if peer_pid != Some(params.reporter_pid) {
+            return write_text_line_allow_disconnect(
+                &mut stream,
+                &error_response_json(
+                    request.id,
+                    "codex_report_unverified",
+                    "Codex session reporter does not match the local connection".into(),
+                ),
+            );
+        }
+    }
+
     let request_id = request.id.clone();
     let method = api_method_name(&request.method);
     let changes_ui = request_changes_ui(&request);
@@ -644,6 +660,7 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
         Method::PaneRead(_) => "pane.read",
         Method::PaneReportAgent(_) => "pane.report_agent",
         Method::PaneReportAgentSession(_) => "pane.report_agent_session",
+        Method::PaneReportCodexSession(_) => "pane.report_codex_session",
         Method::PaneReportMetadata(_) => "pane.report_metadata",
         Method::PaneClearAgentAuthority(_) => "pane.clear_agent_authority",
         Method::PaneReleaseAgent(_) => "pane.release_agent",
@@ -777,6 +794,30 @@ mod windows_tests {
             done_tx.send(result).unwrap();
         });
         (done_rx, thread)
+    }
+
+    #[test]
+    fn codex_report_rejects_pid_that_is_not_socket_peer() {
+        let (mut client, server, path) = local_stream_pair("codex-report-peer");
+        assert_eq!(server.peer_creds().unwrap().pid(), Some(std::process::id()));
+        let (done_rx, server_thread) = spawn_connection(server);
+        writeln!(
+            client,
+            "{{\"id\":\"codex\",\"method\":\"pane.report_codex_session\",\"params\":{{\"pane_id\":\"w1:p1\",\"agent_session_id\":\"session\",\"session_start_source\":\"startup\",\"reporter_pid\":0}}}}"
+        )
+        .unwrap();
+        let mut response = String::new();
+        BufReader::new(&mut client)
+            .read_line(&mut response)
+            .unwrap();
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["error"]["code"], "codex_report_unverified");
+        done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        server_thread.join().unwrap();
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -1146,6 +1187,36 @@ mod tests {
         let client = crate::ipc::connect_local_stream(&path).unwrap();
         let server = listener.accept().unwrap();
         (client, server, path)
+    }
+
+    #[test]
+    fn codex_report_rejects_pid_that_is_not_socket_peer() {
+        let (mut client, server, path) = local_stream_pair("codex-report-peer");
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            server.peer_creds().unwrap().pid(),
+            Some(std::process::id() as i32)
+        );
+        #[cfg(target_os = "macos")]
+        assert_eq!(server.peer_creds().unwrap().pid(), None);
+        let (api_tx, mut api_rx) = mpsc::unbounded_channel::<ApiRequestMessage>();
+        writeln!(
+            client,
+            "{{\"id\":\"codex\",\"method\":\"pane.report_codex_session\",\"params\":{{\"pane_id\":\"w1:p1\",\"agent_session_id\":\"session\",\"session_start_source\":\"startup\",\"reporter_pid\":0}}}}"
+        )
+        .unwrap();
+        handle_connection(
+            server,
+            &api_tx,
+            &EventHub::default(),
+            &Arc::new(AtomicBool::new(true)),
+            None,
+        )
+        .unwrap();
+        let response: serde_json::Value = serde_json::from_str(&read_line(&mut client)).unwrap();
+        assert_eq!(response["error"]["code"], "codex_report_unverified");
+        assert!(api_rx.try_recv().is_err());
+        fs::remove_file(path).unwrap();
     }
 
     #[test]

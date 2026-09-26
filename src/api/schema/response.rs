@@ -39,6 +39,15 @@ pub struct ErrorBody {
     pub message: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexSessionReportStatus {
+    Applied,
+    Unchanged,
+    Invalidated,
+    Rejected,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponseResult {
@@ -278,6 +287,9 @@ pub enum ResponseResult {
         projection_revision: u64,
     },
     Ok {},
+    CodexSessionReport {
+        status: CodexSessionReportStatus,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

@@ -252,3 +252,13 @@ pub fn read_clipboard_image() -> Option<ClipboardImage> {
 pub fn show_desktop_notification(_title: &str, _body: Option<&str>) -> std::io::Result<bool> {
     Ok(false)
 }
+pub(crate) fn process_instance(_pid: u32) -> Option<super::ProcessInstance> {
+    None
+}
+
+pub(crate) fn codex_hook_process_chain(
+    _reporter_pid: u32,
+    _shell_pid: u32,
+) -> Option<Vec<super::HookProcess>> {
+    None
+}

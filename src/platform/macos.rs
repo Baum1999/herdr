@@ -925,6 +925,25 @@ fn process_bsdinfo(pid: u32) -> Option<libc::proc_bsdinfo> {
     (ret == size).then_some(info)
 }
 
+pub(crate) fn process_instance(pid: u32) -> Option<super::ProcessInstance> {
+    let info = process_bsdinfo(pid)?;
+    Some(super::ProcessInstance {
+        pid,
+        started: info
+            .pbi_start_tvsec
+            .checked_mul(1_000_000)?
+            .checked_add(info.pbi_start_tvusec)?,
+    })
+}
+
+pub(crate) fn codex_hook_process_chain(
+    _reporter_pid: u32,
+    _shell_pid: u32,
+) -> Option<Vec<super::HookProcess>> {
+    // No live macOS Codex hook ancestry has been qualified yet.
+    None
+}
+
 fn comm_from_bsdinfo(info: &libc::proc_bsdinfo) -> Option<String> {
     let end = info
         .pbi_comm

@@ -28,9 +28,45 @@ pub struct HookAuthority {
 #[cfg(unix)]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct HandoffAgentState {
-    authority: HookAuthority,
+    authority: Option<HookAuthority>,
     sequence: Option<u64>,
     acquisition_pending: bool,
+    #[serde(default)]
+    codex_scope: Option<CodexReportScope>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+struct CodexReportScope {
+    binding: Option<CodexReportBinding>,
+    expected_resume: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+enum CodexReportBinding {
+    Bound {
+        process: crate::platform::ProcessInstance,
+        session_id: String,
+    },
+    Invalidated {
+        process: crate::platform::ProcessInstance,
+    },
+    Quarantined {
+        shell: Option<crate::platform::ProcessInstance>,
+        handoff_started: Option<u64>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CodexSessionDisposition {
+    Applied,
+    Unchanged,
+    Invalidated,
+    Rejected,
+}
+
+pub(crate) struct CodexSessionTransition {
+    pub disposition: CodexSessionDisposition,
+    pub mutation: Option<TerminalStateMutation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,6 +180,7 @@ pub struct TerminalState {
     managed_agent: Option<ManagedAgent>,
     codex_prompt_ready: bool,
     managed_agent_launch_session: Option<crate::agent_resume::PersistedAgentSession>,
+    codex_report_scope: CodexReportScope,
     hook_report_sequences: HashMap<String, u64>,
     suppressed_full_lifecycle_hook_reports: HashMap<String, SuppressedFullLifecycleHookReport>,
     stale_full_lifecycle_hook_sessions: HashMap<String, Vec<StaleFullLifecycleHookSession>>,
@@ -182,6 +219,7 @@ impl TerminalState {
             managed_agent: None,
             codex_prompt_ready: false,
             managed_agent_launch_session: None,
+            codex_report_scope: CodexReportScope::default(),
             hook_report_sequences: HashMap::new(),
             suppressed_full_lifecycle_hook_reports: HashMap::new(),
             stale_full_lifecycle_hook_sessions: HashMap::new(),
@@ -227,27 +265,39 @@ impl TerminalState {
 
     #[cfg(unix)]
     pub(crate) fn handoff_agent_state(&self) -> Option<HandoffAgentState> {
-        if !self.live_full_lifecycle_hook_authority() {
+        let authority = self
+            .live_full_lifecycle_hook_authority()
+            .then(|| self.hook_authority.clone())
+            .flatten();
+        if authority.is_none() && self.codex_report_scope == CodexReportScope::default() {
             return None;
         }
-        let authority = self.hook_authority.as_ref()?;
         Some(HandoffAgentState {
-            authority: authority.clone(),
-            sequence: self.hook_report_sequences.get(&authority.source).copied(),
+            sequence: authority
+                .as_ref()
+                .and_then(|authority| self.hook_report_sequences.get(&authority.source).copied()),
+            authority,
             acquisition_pending: self.agent_process_acquisition_pending,
+            codex_scope: (self.codex_report_scope != CodexReportScope::default())
+                .then(|| self.codex_report_scope.clone()),
         })
     }
 
     #[cfg(unix)]
     pub(crate) fn restore_handoff_agent_state(&mut self, snapshot: HandoffAgentState) {
-        if let Some(sequence) = snapshot.sequence {
-            self.hook_report_sequences
-                .insert(snapshot.authority.source.clone(), sequence);
-        }
-        self.detected_agent = crate::detect::parse_agent_label(&snapshot.authority.agent_label);
-        self.state = snapshot.authority.state;
-        self.hook_authority = Some(snapshot.authority);
         self.agent_process_acquisition_pending = snapshot.acquisition_pending;
+        if let Some(authority) = snapshot.authority {
+            if let Some(sequence) = snapshot.sequence {
+                self.hook_report_sequences
+                    .insert(authority.source.clone(), sequence);
+            }
+            self.detected_agent = crate::detect::parse_agent_label(&authority.agent_label);
+            self.state = authority.state;
+            self.hook_authority = Some(authority);
+        }
+        if let Some(codex_scope) = snapshot.codex_scope {
+            self.codex_report_scope = codex_scope;
+        }
     }
 
     pub(crate) fn finish_agent_process_acquisition(&mut self) -> bool {
@@ -1431,8 +1481,193 @@ impl TerminalState {
         &mut self,
         session: crate::agent_resume::PersistedAgentSession,
     ) {
+        if session.source == "herdr:codex" && session.agent == "codex" {
+            self.codex_report_scope.expected_resume = Some(session.session_ref.value.clone());
+        }
         self.persisted_agent_session = Some(session.clone());
         self.managed_agent_launch_session = Some(session);
+    }
+
+    pub(crate) fn expect_codex_resume(&mut self, session_id: &str) {
+        self.codex_report_scope.expected_resume = Some(session_id.to_string());
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn quarantine_codex_reports(
+        &mut self,
+        shell: Option<crate::platform::ProcessInstance>,
+        handoff_started: Option<u64>,
+    ) {
+        self.clear_codex_identity();
+        self.codex_report_scope = CodexReportScope {
+            binding: Some(CodexReportBinding::Quarantined {
+                shell,
+                handoff_started,
+            }),
+            expected_resume: None,
+        };
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn has_codex_report_provenance(&self) -> bool {
+        self.codex_report_scope.binding.is_some()
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn codex_reports_quarantined(&self) -> bool {
+        matches!(
+            self.codex_report_scope.binding,
+            Some(CodexReportBinding::Quarantined { .. })
+        )
+    }
+
+    pub(crate) fn report_verified_codex_session(
+        &mut self,
+        process: crate::platform::ProcessInstance,
+        shell: crate::platform::ProcessInstance,
+        session_ref: crate::agent_resume::AgentSessionRef,
+        session_start_source: &str,
+    ) -> CodexSessionTransition {
+        use CodexReportBinding::{Bound, Invalidated, Quarantined};
+        if let Some(Quarantined {
+            shell: imported,
+            handoff_started,
+        }) = &self.codex_report_scope.binding
+        {
+            if imported.is_none_or(|imported| imported == shell)
+                && handoff_started.is_none_or(|started| process.started <= started)
+            {
+                return CodexSessionTransition {
+                    disposition: CodexSessionDisposition::Rejected,
+                    mutation: None,
+                };
+            }
+        }
+        match &self.codex_report_scope.binding {
+            Some(Bound {
+                process: current,
+                session_id,
+            }) if *current == process => {
+                if session_id == &session_ref.value {
+                    return CodexSessionTransition {
+                        disposition: CodexSessionDisposition::Unchanged,
+                        mutation: None,
+                    };
+                }
+                if !matches!(session_start_source, "clear" | "compact" | "resume") {
+                    return self.invalidate_codex_session(process);
+                }
+            }
+            Some(Invalidated { process: current }) if *current == process => {
+                return CodexSessionTransition {
+                    disposition: CodexSessionDisposition::Rejected,
+                    mutation: None,
+                };
+            }
+            _ => {}
+        }
+        if self
+            .codex_report_scope
+            .expected_resume
+            .as_deref()
+            .is_some_and(|expected| expected != session_ref.value)
+        {
+            return self.invalidate_codex_session(process);
+        }
+        let mutation = self.change_codex_identity(Some(session_ref.clone()));
+        self.codex_report_scope = CodexReportScope {
+            binding: Some(Bound {
+                process,
+                session_id: session_ref.value,
+            }),
+            expected_resume: None,
+        };
+        CodexSessionTransition {
+            disposition: CodexSessionDisposition::Applied,
+            mutation: Some(mutation),
+        }
+    }
+
+    fn invalidate_codex_session(
+        &mut self,
+        process: crate::platform::ProcessInstance,
+    ) -> CodexSessionTransition {
+        let mutation = self.change_codex_identity(None);
+        self.codex_report_scope = CodexReportScope {
+            binding: Some(CodexReportBinding::Invalidated { process }),
+            expected_resume: None,
+        };
+        CodexSessionTransition {
+            disposition: CodexSessionDisposition::Invalidated,
+            mutation: Some(mutation),
+        }
+    }
+
+    fn clear_codex_identity(&mut self) {
+        if self
+            .hook_authority
+            .as_ref()
+            .is_some_and(|authority| authority.source == "herdr:codex")
+        {
+            self.hook_authority = None;
+        }
+        if self
+            .persisted_agent_session
+            .as_ref()
+            .is_some_and(|session| session.source == "herdr:codex")
+        {
+            self.persisted_agent_session = None;
+        }
+        if self
+            .managed_agent_launch_session
+            .as_ref()
+            .is_some_and(|session| session.source == "herdr:codex")
+        {
+            self.managed_agent_launch_session = None;
+        }
+    }
+
+    fn change_codex_identity(
+        &mut self,
+        session_ref: Option<crate::agent_resume::AgentSessionRef>,
+    ) -> TerminalStateMutation {
+        let now = Instant::now();
+        let previous_agent_label = self.effective_agent_label().map(str::to_string);
+        let previous_known_agent = self.effective_known_agent();
+        let previous_state = self.state;
+        let previous_presentation = self.effective_presentation_for_state_at(previous_state, now);
+        let previous_session = self.current_session_identity_for_persistence();
+        self.clear_codex_identity();
+        if let Some(session_ref) = session_ref {
+            if self.current_session_owner_conflicts("herdr:codex", "codex") {
+                self.suppress_current_full_lifecycle_hook_authority(
+                    FullLifecycleHookSuppressionReason::HookClear,
+                );
+                self.hook_authority = None;
+            }
+            self.reconcile_agent_name_owner("codex", Some(&session_ref));
+            self.persisted_agent_session = Some(crate::agent_resume::PersistedAgentSession {
+                source: "herdr:codex".into(),
+                agent: "codex".into(),
+                session_ref,
+            });
+        }
+        let session_ref_changed =
+            previous_session != self.current_session_identity_for_persistence();
+        if session_ref_changed && previous_session.is_some() {
+            self.agent_process_acquisition_pending = true;
+        }
+        TerminalStateMutation {
+            effective_state_change: self.recompute_effective_state(
+                previous_agent_label,
+                previous_known_agent,
+                previous_state,
+                previous_presentation,
+                now,
+            ),
+            session_ref_changed,
+            agent_released: false,
+        }
     }
 
     pub fn set_agent_session_ref(
@@ -2147,14 +2382,14 @@ impl TerminalState {
 
     pub fn clear_agent_name(&mut self) {
         self.codex_prompt_ready = false;
-        if self
-            .managed_agent_launch_session
-            .take()
+        let launch_session = self.managed_agent_launch_session.take();
+        if launch_session
             .as_ref()
             .is_some_and(|session| self.persisted_agent_session.as_ref() == Some(session))
         {
             self.persisted_agent_session = None;
         }
+        self.codex_report_scope.expected_resume = None;
         self.agent_name = None;
         self.agent_name_owner = None;
         self.managed_agent = None;
@@ -2179,6 +2414,7 @@ impl TerminalState {
         self.recent_agent_process_exit = None;
         self.agent_process_acquisition_pending = false;
         self.pending_agent_resume_plan = None;
+        self.codex_report_scope = CodexReportScope::default();
         self.clear_agent_name();
     }
 
@@ -2292,6 +2528,239 @@ mod tests {
 
     fn test_terminal() -> TerminalState {
         TerminalState::new(TerminalId::alloc(), "/tmp".into())
+    }
+
+    #[test]
+    fn verified_codex_roots_invalidate_ambiguous_live_identity() {
+        let mut terminal = test_terminal();
+        let first = crate::platform::ProcessInstance {
+            pid: 10,
+            started: 100,
+        };
+        let second = crate::platform::ProcessInstance {
+            pid: 11,
+            started: 101,
+        };
+        let shell = crate::platform::ProcessInstance { pid: 1, started: 1 };
+        let session = |id| crate::agent_resume::AgentSessionRef::id(id).unwrap();
+
+        assert_eq!(
+            terminal
+                .report_verified_codex_session(first, shell, session("root-a"), "startup")
+                .disposition,
+            CodexSessionDisposition::Applied
+        );
+        assert_eq!(
+            terminal
+                .report_verified_codex_session(first, shell, session("root-a"), "startup")
+                .disposition,
+            CodexSessionDisposition::Unchanged
+        );
+        assert_eq!(
+            terminal
+                .report_verified_codex_session(first, shell, session("root-b"), "startup")
+                .disposition,
+            CodexSessionDisposition::Invalidated
+        );
+        assert!(terminal.persisted_agent_session.is_none());
+        assert_eq!(
+            terminal
+                .report_verified_codex_session(first, shell, session("root-a"), "startup")
+                .disposition,
+            CodexSessionDisposition::Rejected
+        );
+        assert_eq!(
+            terminal
+                .report_verified_codex_session(second, shell, session("root-c"), "startup")
+                .disposition,
+            CodexSessionDisposition::Applied
+        );
+    }
+
+    #[test]
+    fn verified_codex_lifecycle_changes_replace_the_same_process_session() {
+        let process = crate::platform::ProcessInstance {
+            pid: 10,
+            started: 100,
+        };
+        let shell = crate::platform::ProcessInstance { pid: 1, started: 1 };
+        let session = |id| crate::agent_resume::AgentSessionRef::id(id).unwrap();
+        for source in ["clear", "compact", "resume"] {
+            let mut terminal = test_terminal();
+            terminal.report_verified_codex_session(process, shell, session("root-a"), "startup");
+            assert_eq!(
+                terminal
+                    .report_verified_codex_session(process, shell, session("root-b"), source)
+                    .disposition,
+                CodexSessionDisposition::Applied
+            );
+            assert_eq!(
+                terminal
+                    .persisted_agent_session
+                    .as_ref()
+                    .map(|session| session.session_ref.value.as_str()),
+                Some("root-b")
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handoff_quarantine_releases_only_for_a_new_process() {
+        let shell = crate::platform::ProcessInstance { pid: 1, started: 1 };
+        let old = crate::platform::ProcessInstance {
+            pid: 10,
+            started: 99,
+        };
+        let new = crate::platform::ProcessInstance {
+            pid: 11,
+            started: 101,
+        };
+        let mut terminal = test_terminal();
+        terminal.quarantine_codex_reports(Some(shell), Some(100));
+        assert_eq!(
+            terminal
+                .report_verified_codex_session(
+                    old,
+                    shell,
+                    crate::agent_resume::AgentSessionRef::id("old-root").unwrap(),
+                    "startup",
+                )
+                .disposition,
+            CodexSessionDisposition::Rejected
+        );
+        assert_eq!(
+            terminal
+                .report_verified_codex_session(
+                    new,
+                    shell,
+                    crate::agent_resume::AgentSessionRef::id("new-root").unwrap(),
+                    "startup",
+                )
+                .disposition,
+            CodexSessionDisposition::Applied
+        );
+    }
+
+    #[test]
+    fn codex_resume_intent_survives_readiness_until_first_root() {
+        let mut terminal = test_terminal();
+        let now = Instant::now();
+        terminal.begin_managed_agent(
+            "codex".into(),
+            Agent::Codex,
+            now,
+            Duration::ZERO,
+            Duration::from_secs(2),
+        );
+        terminal.set_managed_agent_launch_session(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:codex".into(),
+            agent: "codex".into(),
+            session_ref: crate::agent_resume::AgentSessionRef::id("expected").unwrap(),
+        });
+        terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
+        terminal.reconcile_managed_agent_at(now, false);
+        let process = crate::platform::ProcessInstance {
+            pid: 10,
+            started: 100,
+        };
+        let shell = crate::platform::ProcessInstance { pid: 1, started: 1 };
+        assert_eq!(
+            terminal
+                .report_verified_codex_session(
+                    process,
+                    shell,
+                    crate::agent_resume::AgentSessionRef::id("unexpected").unwrap(),
+                    "resume",
+                )
+                .disposition,
+            CodexSessionDisposition::Invalidated
+        );
+        assert!(terminal.persisted_agent_session.is_none());
+    }
+
+    #[test]
+    fn codex_resume_intent_clears_when_managed_process_exits() {
+        let mut terminal = test_terminal();
+        let now = Instant::now();
+        terminal.begin_managed_agent(
+            "codex".into(),
+            Agent::Codex,
+            now,
+            Duration::ZERO,
+            Duration::from_secs(2),
+        );
+        terminal.set_managed_agent_launch_session(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:codex".into(),
+            agent: "codex".into(),
+            session_ref: crate::agent_resume::AgentSessionRef::id("old").unwrap(),
+        });
+        terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
+        terminal.reconcile_managed_agent_at(now, false);
+        assert!(terminal.managed_agent_launch_session.is_none());
+        terminal.reconcile_managed_agent_at(now, true);
+        let transition = terminal.report_verified_codex_session(
+            crate::platform::ProcessInstance {
+                pid: 10,
+                started: 100,
+            },
+            crate::platform::ProcessInstance { pid: 1, started: 1 },
+            crate::agent_resume::AgentSessionRef::id("new").unwrap(),
+            "startup",
+        );
+        assert_eq!(transition.disposition, CodexSessionDisposition::Applied);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_binding_and_invalidation_survive_live_handoff() {
+        let process = crate::platform::ProcessInstance {
+            pid: 10,
+            started: 100,
+        };
+        let shell = crate::platform::ProcessInstance { pid: 1, started: 1 };
+        let session = |id| crate::agent_resume::AgentSessionRef::id(id).unwrap();
+        let mut before = test_terminal();
+        before.report_verified_codex_session(process, shell, session("root-a"), "startup");
+        let snapshot = before.handoff_agent_state().unwrap();
+        let mut after = test_terminal();
+        after.set_persisted_agent_session(before.persisted_agent_session.clone().unwrap());
+        after.restore_handoff_agent_state(snapshot);
+        assert_eq!(
+            after
+                .report_verified_codex_session(process, shell, session("root-b"), "startup")
+                .disposition,
+            CodexSessionDisposition::Invalidated
+        );
+        let invalidated_snapshot = after.handoff_agent_state().unwrap();
+        let mut next = test_terminal();
+        next.restore_handoff_agent_state(invalidated_snapshot);
+        assert_eq!(
+            next.report_verified_codex_session(process, shell, session("root-a"), "startup")
+                .disposition,
+            CodexSessionDisposition::Rejected
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_only_handoff_preserves_pending_acquisition() {
+        let mut before = test_terminal();
+        before.report_verified_codex_session(
+            crate::platform::ProcessInstance {
+                pid: 10,
+                started: 100,
+            },
+            crate::platform::ProcessInstance { pid: 1, started: 1 },
+            crate::agent_resume::AgentSessionRef::id("root").unwrap(),
+            "startup",
+        );
+        before.agent_process_acquisition_pending = true;
+        assert!(before.hook_authority.is_none());
+        let mut after = test_terminal();
+        after.restore_handoff_agent_state(before.handoff_agent_state().unwrap());
+        after.state = AgentState::Idle;
+        assert!(after.finish_agent_process_acquisition());
     }
 
     fn test_session_path(name: &str) -> String {

@@ -70,7 +70,14 @@ fn run_shell_hook_with_env(
                     let mut line = String::new();
                     let mut reader = BufReader::new(stream.try_clone().unwrap());
                     reader.read_line(&mut line).unwrap();
-                    let _ = stream.write_all(br#"{"id":"test","result":{"type":"ok"}}"#);
+                    let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                    let result = if request["method"] == "pane.report_codex_session" {
+                        serde_json::json!({"type":"codex_session_report","status":"applied"})
+                    } else {
+                        serde_json::json!({"type":"ok"})
+                    };
+                    let response = serde_json::json!({"id":request["id"],"result":result});
+                    let _ = stream.write_all(response.to_string().as_bytes());
                     let _ = stream.write_all(b"\n");
                     let _ = stream.flush();
                     return Some(line);
@@ -189,18 +196,19 @@ fn claude_hook_ignores_cursor_compatibility_payloads() {
 fn codex_hook_reports_persisted_root_session_and_ignores_ephemeral_or_nested_sessions() {
     let request = run_codex_hook(
         "session",
-        r#"{"hook_event_name":"SessionStart","session_id":"codex-session","transcript_path":"/tmp/codex-session.jsonl"}"#,
+        r#"{"hook_event_name":"SessionStart","source":"startup","session_id":"codex-session","transcript_path":"/tmp/codex-session.jsonl"}"#,
     )
     .expect("codex hook should report session identity");
 
-    assert_eq!(request["method"], "pane.report_agent_session");
+    assert_eq!(request["method"], "pane.report_codex_session");
     assert_eq!(request["params"]["agent_session_id"], "codex-session");
+    assert!(request["params"]["reporter_pid"].as_u64().is_some());
     assert!(request["params"].get("state").is_none());
 
     let matching_request = run_shell_hook_with_env(
         "src/integration/assets/codex/herdr-agent-state.sh",
         &["session"],
-        r#"{"hook_event_name":"SessionStart","session_id":"codex-session","transcript_path":"/tmp/codex-session.jsonl"}"#,
+        r#"{"hook_event_name":"SessionStart","source":"startup","session_id":"codex-session","transcript_path":"/tmp/codex-session.jsonl"}"#,
         &[("CODEX_THREAD_ID", "codex-session")],
     )
     .expect("matching inherited session should still report");
@@ -211,14 +219,14 @@ fn codex_hook_reports_persisted_root_session_and_ignores_ephemeral_or_nested_ses
 
     assert!(run_codex_hook(
         "session",
-        r#"{"hook_event_name":"SessionStart","session_id":"side-session","transcript_path":null}"#,
+        r#"{"hook_event_name":"SessionStart","source":"startup","session_id":"side-session","transcript_path":null}"#,
     )
     .is_none());
 
     assert!(run_shell_hook_with_env(
         "src/integration/assets/codex/herdr-agent-state.sh",
         &["session"],
-        r#"{"hook_event_name":"SessionStart","session_id":"nested-session","transcript_path":"/tmp/nested-session.jsonl"}"#,
+        r#"{"hook_event_name":"SessionStart","source":"startup","session_id":"nested-session","transcript_path":"/tmp/nested-session.jsonl"}"#,
         &[("CODEX_THREAD_ID", "parent-session")],
     )
     .is_none());

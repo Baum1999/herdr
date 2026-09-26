@@ -665,6 +665,14 @@ impl App {
         app.state.pane_id_aliases = pane_id_aliases;
         app.state.workspaces = workspaces;
         app.state.terminals = terminals;
+        if app
+            .state
+            .terminals
+            .values()
+            .any(crate::terminal::TerminalState::codex_reports_quarantined)
+        {
+            app.state.mark_session_dirty();
+        }
         app.terminal_runtimes = runtimes.into();
         app.state.active = snapshot
             .active
@@ -2921,6 +2929,45 @@ mod tests {
         assert_eq!(
             app.state.terminals[&terminal_id].agent_name.as_deref(),
             Some("worker")
+        );
+    }
+
+    #[tokio::test]
+    async fn managed_codex_prompt_option_does_not_suppress_no_daemon() {
+        let mut app = test_app();
+        let workspace = Workspace::test_new("codex-prompt-option");
+        let root = workspace.tabs[0].root_pane;
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let pane_id = app.pane_info(0, root).unwrap().pane_id;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&root]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_manual_label("shell".into());
+        let (runtime, _receiver) =
+            crate::terminal::TerminalRuntime::test_with_channel_capacity(80, 24, 1);
+        app.terminal_runtimes.insert(terminal_id, runtime);
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "codex-prompt-option".into(),
+            method: crate::api::schema::Method::AgentStart(crate::api::schema::AgentStartParams {
+                name: "worker".into(),
+                kind: "codex".into(),
+                pane_id,
+                args: vec!["--".into(), "--no-daemon".into()],
+                timeout_ms: Some(4_000),
+            }),
+        });
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            response["result"]["argv"],
+            serde_json::json!(["codex", "--no-daemon", "--", "--no-daemon"])
         );
     }
 

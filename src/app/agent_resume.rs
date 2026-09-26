@@ -311,6 +311,14 @@ impl App {
 
         self.terminal_runtimes.insert(terminal_id.clone(), runtime);
         if let Some(terminal) = self.state.terminals.get_mut(&terminal_id) {
+            if plan.agent == "codex" {
+                if let Some(session) = crate::agent_resume::persisted_session_from_launch_args(
+                    crate::detect::Agent::Codex,
+                    &plan.argv[1..],
+                ) {
+                    terminal.expect_codex_resume(&session.session_ref.value);
+                }
+            }
             terminal.pending_agent_resume_plan = None;
             terminal.respawn_shell_on_exit = false;
         }

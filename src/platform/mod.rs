@@ -51,6 +51,113 @@ pub struct ForegroundJob {
     pub processes: Vec<ForegroundProcess>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ProcessInstance {
+    pub pid: u32,
+    pub started: u64,
+}
+
+#[derive(Debug)]
+pub(crate) struct CodexHookOwner {
+    pub process: ProcessInstance,
+    pub shell: ProcessInstance,
+}
+
+#[derive(Debug)]
+pub(crate) struct HookProcess {
+    pub instance: ProcessInstance,
+    #[cfg(any(target_os = "linux", windows))]
+    pub parent_pid: u32,
+    pub name: String,
+    pub argv: Option<Vec<String>>,
+}
+
+pub(crate) fn codex_hook_owner(shell_pid: u32, reporter_pid: u32) -> Option<CodexHookOwner> {
+    if shell_pid == 0 || reporter_pid == 0 || shell_pid == reporter_pid {
+        return None;
+    }
+    let chain = codex_hook_process_chain(reporter_pid, shell_pid)?;
+    let shell = chain.last()?.instance;
+    let process = codex_process_from_chain(&chain, &foreground_job(shell_pid)?)?;
+    if process_instance(process.pid)? != process || process_instance(shell_pid)? != shell {
+        return None;
+    }
+    Some(CodexHookOwner { process, shell })
+}
+
+fn codex_process_from_chain(
+    chain: &[HookProcess],
+    foreground: &ForegroundJob,
+) -> Option<ProcessInstance> {
+    let mut codex = None;
+    for (index, process) in chain.iter().enumerate() {
+        let name = normalized_process_name(&process.name);
+        if name != "codex" && name != "codex.exe" {
+            continue;
+        }
+        let argv = process.argv.as_ref()?;
+        if argv
+            .iter()
+            .skip(1)
+            .take_while(|arg| arg.as_str() != "--")
+            .any(|arg| arg == "app-server")
+        {
+            if !argv.iter().any(|arg| arg == "stdio://")
+                || argv.iter().any(|arg| arg == "--managed-daemon")
+            {
+                return None;
+            }
+            continue;
+        }
+        if codex.replace((index, process.instance)).is_some() {
+            return None;
+        }
+    }
+    let (index, process) = codex?;
+    if !foreground.processes.iter().any(|foreground_process| {
+        chain[index..chain.len() - 1]
+            .iter()
+            .any(|ancestor| ancestor.instance.pid == foreground_process.pid)
+    }) {
+        return None;
+    }
+    Some(process)
+}
+
+#[cfg(any(target_os = "linux", windows))]
+pub(crate) fn codex_hook_process_chain_with(
+    reporter_pid: u32,
+    shell_pid: u32,
+    mut read: impl FnMut(u32) -> Option<HookProcess>,
+) -> Option<Vec<HookProcess>> {
+    let mut chain = Vec::new();
+    let mut pid = reporter_pid;
+    for _ in 0..32 {
+        if chain
+            .iter()
+            .any(|process: &HookProcess| process.instance.pid == pid)
+        {
+            return None;
+        }
+        let process = read(pid)?;
+        if let Some(child) = chain.last() {
+            if process.instance.started > child.instance.started {
+                return None;
+            }
+        }
+        let parent_pid = process.parent_pid;
+        chain.push(process);
+        if pid == shell_pid {
+            return Some(chain);
+        }
+        if parent_pid == 0 {
+            return None;
+        }
+        pid = parent_pid;
+    }
+    None
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Signal {
     Hangup,
@@ -726,4 +833,107 @@ pub(crate) fn shared_ssh_control_path(
         std::io::ErrorKind::Unsupported,
         "interactive SSH recovery requires Unix OpenSSH multiplexing",
     ))
+}
+
+#[cfg(all(test, any(target_os = "linux", windows)))]
+mod codex_hook_tests {
+    use super::*;
+
+    fn process(pid: u32, parent_pid: u32, name: &str, args: &[&str]) -> HookProcess {
+        HookProcess {
+            instance: ProcessInstance {
+                pid,
+                started: pid as u64,
+            },
+            parent_pid,
+            name: name.into(),
+            argv: Some(args.iter().map(|arg| (*arg).into()).collect()),
+        }
+    }
+
+    fn foreground(pid: u32) -> ForegroundJob {
+        ForegroundJob {
+            process_group_id: pid,
+            processes: vec![ForegroundProcess {
+                pid,
+                name: "codex".into(),
+                argv0: None,
+                argv: None,
+                cmdline: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn codex_hook_requires_a_local_interactive_owner() {
+        let local = vec![
+            process(50, 40, "pwsh.exe", &["pwsh"]),
+            process(
+                40,
+                30,
+                "codex.exe",
+                &["C:\\app-server-daemon\\codex.exe", "--no-daemon"],
+            ),
+            process(30, 20, "node.exe", &["node", "codex.js"]),
+            process(20, 0, "pwsh.exe", &["pwsh"]),
+        ];
+        assert_eq!(
+            codex_process_from_chain(&local, &foreground(30)),
+            Some(local[1].instance)
+        );
+        let prompt = vec![
+            process(50, 40, "pwsh.exe", &["pwsh"]),
+            process(
+                40,
+                20,
+                "codex.exe",
+                &["codex.exe", "--no-daemon", "--", "app-server"],
+            ),
+            process(20, 0, "pwsh.exe", &["pwsh"]),
+        ];
+        assert_eq!(
+            codex_process_from_chain(&prompt, &foreground(40)),
+            Some(prompt[1].instance)
+        );
+        let embedded = vec![
+            process(60, 50, "pwsh.exe", &["pwsh"]),
+            process(
+                50,
+                40,
+                "codex.exe",
+                &["codex.exe", "app-server", "--listen", "stdio://"],
+            ),
+            process(40, 20, "codex.exe", &["codex.exe", "--no-daemon"]),
+            process(20, 0, "pwsh.exe", &["pwsh"]),
+        ];
+        assert_eq!(
+            codex_process_from_chain(&embedded, &foreground(40)),
+            Some(embedded[2].instance)
+        );
+
+        let daemon = vec![
+            process(60, 50, "pwsh.exe", &["pwsh"]),
+            process(
+                50,
+                20,
+                "codex.exe",
+                &[
+                    "codex.exe",
+                    "app-server",
+                    "--listen",
+                    "unix://",
+                    "--managed-daemon",
+                ],
+            ),
+            process(20, 0, "pwsh.exe", &["pwsh"]),
+        ];
+        assert_eq!(codex_process_from_chain(&daemon, &foreground(50)), None);
+        let nested = vec![
+            process(60, 50, "pwsh.exe", &["pwsh"]),
+            process(50, 40, "codex.exe", &["codex.exe"]),
+            process(40, 20, "codex.exe", &["codex.exe"]),
+            process(20, 0, "pwsh.exe", &["pwsh"]),
+        ];
+        assert_eq!(codex_process_from_chain(&nested, &foreground(40)), None);
+    }
 }

@@ -73,9 +73,12 @@ pub fn persisted_session_from_launch_args(
     agent: crate::detect::Agent,
     args: &[String],
 ) -> Option<PersistedAgentSession> {
-    let [command, session_id] = args else {
+    let ([command, session_id] | [_, command, session_id]) = args else {
         return None;
     };
+    if args.len() == 3 && args[0] != "--no-daemon" {
+        return None;
+    }
     if agent != crate::detect::Agent::Codex || command != "resume" || session_id.starts_with('-') {
         return None;
     }
@@ -147,7 +150,12 @@ pub fn plan(source: &str, agent: &str, session_ref: &AgentSessionRef) -> Option<
             ]
         }
         ("herdr:codex", "codex", AgentSessionRefKind::Id) => {
-            vec!["codex".into(), "resume".into(), session_ref.value.clone()]
+            vec![
+                "codex".into(),
+                "--no-daemon".into(),
+                "resume".into(),
+                session_ref.value.clone(),
+            ]
         }
         ("herdr:copilot", "copilot", AgentSessionRefKind::Id) => {
             vec!["copilot".into(), format!("--resume={}", session_ref.value)]
@@ -333,6 +341,20 @@ mod tests {
             .value,
             "codex-session"
         );
+        assert_eq!(
+            persisted_session_from_launch_args(
+                crate::detect::Agent::Codex,
+                &[
+                    "--no-daemon".into(),
+                    "resume".into(),
+                    "codex-session".into()
+                ]
+            )
+            .unwrap()
+            .session_ref
+            .value,
+            "codex-session"
+        );
         assert!(persisted_session_from_launch_args(
             crate::detect::Agent::Codex,
             &["resume".into(), "--last".into()]
@@ -377,7 +399,7 @@ mod tests {
             )
             .unwrap()
             .argv,
-            vec!["codex", "resume", "codex-session"]
+            vec!["codex", "--no-daemon", "resume", "codex-session"]
         );
         assert_eq!(
             plan(
@@ -748,7 +770,7 @@ mod tests {
     fn ids_are_data_not_shell_text() {
         let id = "abc; rm -rf /";
         let codex_plan = plan("herdr:codex", "codex", &AgentSessionRef::id(id).unwrap()).unwrap();
-        assert_eq!(codex_plan.argv, vec!["codex", "resume", id]);
+        assert_eq!(codex_plan.argv, vec!["codex", "--no-daemon", "resume", id]);
 
         let copilot_plan = plan(
             "herdr:copilot",

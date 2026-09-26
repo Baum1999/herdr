@@ -530,6 +530,11 @@ fn restore_tab(
             .and_then(crate::detect::parse_canonical_agent_label);
         let saved_launch_argv = saved_pane.and_then(|p| p.launch_argv.clone());
         let saved_agent_session = saved_pane.and_then(|p| p.agent_session.as_ref());
+        #[cfg(unix)]
+        let imported_codex = saved_agent_session
+            .is_some_and(|session| session.source == "herdr:codex")
+            || saved_managed_agent == Some(crate::detect::Agent::Codex)
+            || saved_agent_name.as_deref() == Some("codex");
         let saved_history =
             old_id.and_then(|old_id| history.and_then(|history| history.panes.get(old_id)));
         let startup = {
@@ -700,6 +705,16 @@ fn restore_tab(
                 #[cfg(unix)]
                 if let Some(agent_state) = handoff_agent_state {
                     terminal.restore_handoff_agent_state(agent_state);
+                }
+                #[cfg(unix)]
+                if was_imported && imported_codex && !terminal.has_codex_report_provenance() {
+                    terminal.quarantine_codex_reports(
+                        runtime
+                            .child_pid()
+                            .and_then(crate::platform::process_instance),
+                        crate::platform::process_instance(std::process::id())
+                            .map(|process| process.started),
+                    );
                 }
                 panes.insert(*id, PaneState::new(terminal_id.clone()));
                 terminal_runtimes.insert(terminal_id, runtime);
@@ -1789,6 +1804,7 @@ mod tests {
             drop(restored_runtimes);
             drop(runtimes);
             let terminal = restored_terminals.values_mut().next().unwrap();
+            assert!(!terminal.codex_reports_quarantined());
             assert_eq!(terminal.state, state_before_handoff);
             terminal.set_detected_state(Some(crate::detect::Agent::Pi), AgentState::Idle);
             assert_eq!(

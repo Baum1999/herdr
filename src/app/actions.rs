@@ -1616,6 +1616,30 @@ impl AppState {
         }
     }
 
+    pub(crate) fn report_verified_codex_session(
+        &mut self,
+        pane_id: PaneId,
+        owner: crate::platform::CodexHookOwner,
+        session_ref: crate::agent_resume::AgentSessionRef,
+        session_start_source: &str,
+    ) -> (
+        crate::terminal::state::CodexSessionDisposition,
+        Option<PaneStateUpdate>,
+    ) {
+        let mut disposition = crate::terminal::state::CodexSessionDisposition::Rejected;
+        let update = self.update_terminal_state(pane_id, |terminal| {
+            let transition = terminal.report_verified_codex_session(
+                owner.process,
+                owner.shell,
+                session_ref,
+                session_start_source,
+            );
+            disposition = transition.disposition;
+            transition.mutation
+        });
+        (disposition, update)
+    }
+
     fn update_terminal_state<F>(&mut self, pane_id: PaneId, update: F) -> Option<PaneStateUpdate>
     where
         F: FnOnce(&mut crate::terminal::TerminalState) -> Option<TerminalStateMutation>,

@@ -153,7 +153,7 @@ Install the Codex hook:
 herdr integration install codex
 ```
 
-The Codex hook reports session identity through the same local socket API used by other integrations. Codex state comes from Herdr's screen manifest detection.
+The Codex hook reports session identity when its local process belongs to the pane. Herdr starts and resumes Codex with `--no-daemon` so that the hook stays with that pane; Codex state still comes from screen detection. A directly launched Codex session using the shared app-server daemon remains usable, but Herdr cannot safely attribute its session ID until Codex provides client identity to hooks. Run direct Codex sessions with `codex --no-daemon` when you need automatic session restore. Starting multiple unrelated sessions in one Codex TUI can leave automatic restore unavailable for that run; restarting Codex locally allows Herdr to bind again. Automatic Codex session attribution is unavailable on WSL, where process inspection can block, and on macOS until its hook ancestry is validated.
 
 Herdr uses `~/.codex` by default, or `CODEX_HOME` when set. The Codex config directory must already exist. Install writes `herdr-agent-state.sh`, updates `hooks.json`, and ensures `[features] hooks = true` in `config.toml`. It also removes the deprecated top-level `codex_hooks` flag when present. Uninstall removes Herdr entries from `hooks.json` and deletes the hook script, but leaves `config.toml` unchanged.
 
