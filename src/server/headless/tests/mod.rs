@@ -7243,6 +7243,104 @@ fn completion_guard_api_report(server: &mut HeadlessServer, method: api::schema:
     serde_json::from_str::<api::schema::SuccessResponse>(&response).expect("successful report");
 }
 
+#[test]
+fn api_report_agent_stores_valid_resume_argv_and_rejects_invalid() {
+    let (writer, _control_rx, _render_rx) = test_client_writer();
+    let (mut server, pane_id) = completion_guard_server(writer);
+    let public_pane_id = server.app.public_pane_id(0, pane_id).unwrap();
+    let terminal_id = server.app.state.workspaces[0].tabs[0].panes[&pane_id]
+        .attached_terminal_id
+        .clone();
+    let report = |resume_argv: Vec<&str>| {
+        api::schema::Method::PaneReportAgent(api::schema::PaneReportAgentParams {
+            pane_id: public_pane_id.clone(),
+            source: "prime-agent".into(),
+            agent: "prime-agent".into(),
+            state: api::schema::PaneAgentState::Idle,
+            message: None,
+            seq: Some(1),
+            agent_session_id: Some("01a0".into()),
+            agent_session_path: None,
+            resume_argv: Some(resume_argv.into_iter().map(String::from).collect()),
+        })
+    };
+
+    completion_guard_api_report(
+        &mut server,
+        report(vec!["prime-agent", "--resume", "01a0", "--model", "x"]),
+    );
+    assert_eq!(
+        server.app.state.terminals[&terminal_id]
+            .reported_resume()
+            .unwrap()
+            .argv,
+        vec!["prime-agent", "--resume", "01a0", "--model", "x"]
+    );
+
+    completion_guard_api_report(&mut server, report(vec!["prime-agent", "--resume", "dup"]));
+    assert_eq!(
+        server.app.state.terminals[&terminal_id]
+            .reported_resume()
+            .unwrap()
+            .argv[2],
+        "01a0",
+        "a duplicate sequence number must not replace the command"
+    );
+
+    let (respond_to, response_rx) = std::sync::mpsc::channel();
+    server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+        request: api::schema::Request {
+            id: "invalid-resume".into(),
+            method: report(vec!["/opt/prime/prime-agent", "--resume", "01a0"]),
+        },
+        respond_to,
+        response_write_complete: None,
+    });
+    let response = response_rx
+        .recv_timeout(Duration::from_millis(100))
+        .unwrap();
+    assert!(response.contains("invalid_resume_argv"), "{response}");
+    assert_eq!(
+        server.app.state.terminals[&terminal_id]
+            .reported_resume()
+            .unwrap()
+            .argv[0],
+        "prime-agent"
+    );
+
+    let (respond_to, response_rx) = std::sync::mpsc::channel();
+    server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+        request: api::schema::Request {
+            id: "not-owner".into(),
+            method: api::schema::Method::PaneReportAgentSession(
+                api::schema::PaneReportAgentSessionParams {
+                    pane_id: public_pane_id.clone(),
+                    source: "custom:intruder".into(),
+                    agent: "intruder".into(),
+                    seq: None,
+                    agent_session_id: None,
+                    agent_session_path: None,
+                    session_start_source: None,
+                    resume_argv: Some(vec!["intruder".into()]),
+                },
+            ),
+        },
+        respond_to,
+        response_write_complete: None,
+    });
+    let response = response_rx
+        .recv_timeout(Duration::from_millis(100))
+        .unwrap();
+    assert!(response.contains("resume_not_accepted"), "{response}");
+    assert_eq!(
+        server.app.state.terminals[&terminal_id]
+            .reported_resume()
+            .unwrap()
+            .agent,
+        "prime-agent"
+    );
+}
+
 fn completion_guard_notifications(
     server: &mut HeadlessServer,
     receiver: &std::sync::mpsc::Receiver<Vec<u8>>,
@@ -7301,6 +7399,7 @@ fn completion_guard_api_startup_blocker_respects_suppression() {
                 seq: Some(seq as u64 + 1),
                 agent_session_id: None,
                 agent_session_path: None,
+                resume_argv: None,
             }),
         );
     }
@@ -7364,6 +7463,7 @@ fn completion_guard_api_session_replacement_does_not_notify_finished() {
                     seq: Some(11),
                     agent_session_id: None,
                     agent_session_path: Some(new_session.clone()),
+                    resume_argv: None,
                     session_start_source: Some(reason.into()),
                 }),
             );
@@ -7376,6 +7476,7 @@ fn completion_guard_api_session_replacement_does_not_notify_finished() {
                 seq: Some(12),
                 agent_session_id: None,
                 agent_session_path: Some(new_session.clone()),
+                resume_argv: None,
             };
             completion_guard_api_report(&mut server, Method::PaneReportAgent(report.clone()));
             let terminal = &server.app.state.terminals[&terminal_id];
@@ -7566,6 +7667,7 @@ fn stale_api_agent_report_does_not_forward_done_sound() {
                 seq: Some(19),
                 agent_session_id: None,
                 agent_session_path: None,
+                resume_argv: None,
             }),
         },
         respond_to,
