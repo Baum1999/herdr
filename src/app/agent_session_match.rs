@@ -4,8 +4,10 @@
 //! environment of whichever pane started it, so the pane it would name is not
 //! trustworthy. Such agents report a session at the start of that session's
 //! first turn, so the report belongs to the only eligible pane whose turn
-//! started close to it. The decision waits until the window closes, and
-//! anything ambiguous binds nothing.
+//! started close to it. When several panes started together, a pane that
+//! already owns the session (for example one Herdr resumed) breaks the tie.
+//! The decision waits until the window closes, and anything else ambiguous
+//! binds nothing.
 
 use std::time::{Duration, Instant};
 
@@ -24,7 +26,8 @@ const DECISION_GRACE: Duration = Duration::from_millis(500);
 #[derive(Debug, Clone)]
 pub(crate) struct UnattributedSessionReport {
     pub agent: Agent,
-    /// Panes running this agent in the reported cwd when the report arrived.
+    /// Panes in the reported cwd when the report arrived. Whether they run the
+    /// agent is checked when the report is decided.
     pub eligible: Vec<PaneId>,
     pub source: String,
     pub agent_label: String,
@@ -109,14 +112,6 @@ impl AppState {
         report: UnattributedSessionReport,
         received: Instant,
     ) -> Vec<PaneStateUpdate> {
-        // A pane that already owns this session, for example one Herdr launched
-        // with `resume`, keeps it regardless of which pane was active.
-        if let Some(pane_id) = self.pane_owning_agent_session(&report) {
-            return self
-                .apply_unattributed_agent_session(pane_id, report)
-                .into_iter()
-                .collect();
-        }
         self.agent_session_matcher.pending.push((received, report));
         Vec::new()
     }
@@ -140,15 +135,23 @@ impl AppState {
                 })
                 .map(|(pane_id, _)| pane_id)
                 .collect();
-            match candidates.as_slice() {
-                [pane_id] => {
-                    let pane_id = *pane_id;
+            let owners: Vec<PaneId> = candidates
+                .iter()
+                .copied()
+                .filter(|pane_id| self.pane_owns_agent_session(*pane_id, &report))
+                .collect();
+            let chosen = match (candidates.as_slice(), owners.as_slice()) {
+                ([pane_id], _) | (_, [pane_id]) => Some(*pane_id),
+                _ => None,
+            };
+            match chosen {
+                Some(pane_id) => {
                     updates.extend(self.apply_unattributed_agent_session(pane_id, report));
                 }
-                [] => {
+                None if candidates.is_empty() => {
                     tracing::info!(agent = %report.agent_label, "no pane matched agent session report")
                 }
-                _ => {
+                None => {
                     tracing::info!(agent = %report.agent_label, "dropping ambiguous agent session report")
                 }
             }
@@ -197,21 +200,14 @@ impl AppState {
                 .is_some_and(|terminal| terminal.detected_agent == Some(agent))
     }
 
-    fn pane_owning_agent_session(&self, report: &UnattributedSessionReport) -> Option<PaneId> {
-        self.workspaces.iter().find_map(|ws| {
-            ws.tabs.iter().find_map(|tab| {
-                tab.panes.iter().find_map(|(pane_id, pane)| {
-                    self.terminals
-                        .get(&pane.attached_terminal_id)
-                        .is_some_and(|terminal| {
-                            terminal.detected_agent == Some(report.agent)
-                                && terminal
-                                    .owns_agent_session(&report.agent_label, &report.session_ref)
-                        })
-                        .then_some(*pane_id)
-                })
+    fn pane_owns_agent_session(&self, pane_id: PaneId, report: &UnattributedSessionReport) -> bool {
+        self.workspaces
+            .iter()
+            .find_map(|ws| ws.pane_state(pane_id))
+            .and_then(|pane| self.terminals.get(&pane.attached_terminal_id))
+            .is_some_and(|terminal| {
+                terminal.owns_agent_session(&report.agent_label, &report.session_ref)
             })
-        })
     }
 
     fn apply_unattributed_agent_session(
@@ -402,25 +398,64 @@ mod tests {
             assert_eq!(session_of(&state, panes[0]), None);
         }
 
-        #[test]
-        fn existing_session_owner_wins_over_timing() {
-            let (mut state, panes) = app_with_codex_panes(2);
-            let pane = state.workspaces[0].pane_state(panes[0]).unwrap();
+        fn resume_in(state: &mut AppState, pane_id: PaneId, session: &str) {
+            let terminal_id = state.workspaces[0..]
+                .iter()
+                .find_map(|ws| ws.pane_state(pane_id))
+                .unwrap()
+                .attached_terminal_id
+                .clone();
             state
                 .terminals
-                .get_mut(&pane.attached_terminal_id.clone())
+                .get_mut(&terminal_id)
                 .unwrap()
                 .set_managed_agent_launch_session(crate::agent_resume::PersistedAgentSession {
                     source: "herdr:codex".into(),
                     agent: "codex".into(),
-                    session_ref: AgentSessionRef::id("resumed").unwrap(),
+                    session_ref: AgentSessionRef::id(session).unwrap(),
                 });
+        }
+
+        #[test]
+        fn session_owner_breaks_a_simultaneous_start() {
+            let (mut state, panes) = app_with_codex_panes(2);
+            resume_in(&mut state, panes[0], "resumed");
             let t = Instant::now();
             set_state(&mut state, panes[1], AgentState::Working, t);
+            set_state(&mut state, panes[0], AgentState::Working, t);
             state.report_unattributed_agent_session(report_for(&panes, "resumed"), t);
             decide(&mut state, t);
             assert_eq!(session_of(&state, panes[0]).as_deref(), Some("resumed"));
             assert_eq!(session_of(&state, panes[1]), None);
+        }
+
+        #[test]
+        fn session_owner_does_not_override_the_pane_that_started() {
+            let (mut state, panes) = app_with_codex_panes(2);
+            resume_in(&mut state, panes[0], "shared");
+            let t = Instant::now();
+            set_state(&mut state, panes[1], AgentState::Working, t);
+            state.report_unattributed_agent_session(report_for(&panes, "shared"), t);
+            decide(&mut state, t);
+            assert_eq!(session_of(&state, panes[1]).as_deref(), Some("shared"));
+        }
+
+        #[test]
+        fn pane_not_running_the_agent_when_reported_can_still_match() {
+            let mut state = AppState::test_new();
+            state.workspaces.push(Workspace::test_new("ws"));
+            state.ensure_test_terminals();
+            let pane_id = state.workspaces[0].tabs[0].root_pane;
+            let t = Instant::now();
+            state.report_unattributed_agent_session(report_for(&[pane_id], "early"), t);
+            set_state(
+                &mut state,
+                pane_id,
+                AgentState::Working,
+                t + Duration::from_millis(200),
+            );
+            decide(&mut state, t);
+            assert_eq!(session_of(&state, pane_id).as_deref(), Some("early"));
         }
     }
 

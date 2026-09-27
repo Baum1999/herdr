@@ -130,7 +130,7 @@ Install the Codex hook:
 herdr integration install codex
 ```
 
-The Codex hook reports session identity through the local socket API. Codex can run hooks in its shared background server, which does not know which pane asked, so the hook reports the session and its working directory without naming a pane. Herdr assigns the session to the Codex pane in that directory whose turn started at the same time, or to the pane Herdr resumed with that session. If two Codex panes start at once, Herdr leaves the session unassigned rather than guess. Codex state comes from Herdr's screen manifest detection.
+The Codex hook reports session identity through the local socket API. Codex can run hooks in its shared background server, which does not know which pane asked, so the hook reports the session and its working directory without naming a pane. Herdr assigns the session to the Codex pane in that directory whose turn started at the same time. If several Codex panes start at once, a pane Herdr resumed with that session wins; otherwise Herdr leaves the session unassigned rather than guess. Codex state comes from Herdr's screen manifest detection.
 
 When the shared background server was started from another Herdr session, its reports reach that session's server, so Codex panes in the other session are not assigned a session. Update to Codex integration version `9` with `herdr integration install codex` to get this behavior.
 

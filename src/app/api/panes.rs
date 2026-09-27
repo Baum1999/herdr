@@ -1714,7 +1714,7 @@ impl App {
                 "source cannot report this agent's session or session id is invalid",
             );
         };
-        let eligible = self.agent_panes_in_cwd(agent, params.cwd.as_deref());
+        let eligible = self.panes_in_cwd(params.cwd.as_deref());
         self.handle_internal_event(crate::events::AppEvent::UnattributedAgentSessionReported(
             crate::app::UnattributedSessionReport {
                 agent,
@@ -1731,29 +1731,24 @@ impl App {
         encode_success(id, ResponseResult::Ok {})
     }
 
-    fn agent_panes_in_cwd(&self, agent: crate::detect::Agent, cwd: Option<&str>) -> Vec<PaneId> {
+    /// Panes whose foreground process works in `cwd`, falling back to the
+    /// shell cwd only when the foreground cwd is unknown.
+    fn panes_in_cwd(&self, cwd: Option<&str>) -> Vec<PaneId> {
         let wanted = cwd.map(|cwd| comparable_path(std::path::Path::new(cwd)));
         let mut panes = Vec::new();
         for ws in &self.state.workspaces {
             for tab in &ws.tabs {
-                for (pane_id, pane) in &tab.panes {
-                    let runs_agent = self
-                        .state
-                        .terminals
-                        .get(&pane.attached_terminal_id)
-                        .is_some_and(|terminal| terminal.detected_agent == Some(agent));
-                    if !runs_agent {
-                        continue;
-                    }
+                for pane_id in tab.panes.keys() {
                     let in_cwd = wanted.as_ref().is_none_or(|wanted| {
                         tab.foreground_cwd_for_pane(*pane_id, &self.terminal_runtimes)
-                            .into_iter()
-                            .chain(tab.cwd_for_pane(
-                                *pane_id,
-                                &self.state.terminals,
-                                &self.terminal_runtimes,
-                            ))
-                            .any(|cwd| comparable_path(&cwd) == *wanted)
+                            .or_else(|| {
+                                tab.cwd_for_pane(
+                                    *pane_id,
+                                    &self.state.terminals,
+                                    &self.terminal_runtimes,
+                                )
+                            })
+                            .is_some_and(|cwd| comparable_path(&cwd) == *wanted)
                     });
                     if in_cwd {
                         panes.push(*pane_id);
