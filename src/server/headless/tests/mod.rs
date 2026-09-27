@@ -6310,6 +6310,52 @@ fn direct_terminal_mouse_uses_runtime_protocol_encoding() {
 }
 
 #[test]
+fn direct_terminal_mouse_sends_nothing_without_mouse_reporting() {
+    with_terminal_session_test_server(|server, runtime_terminal_id, terminal_id, _pane_id| {
+        // A plain shell never enabled mouse reporting, so a controller's click
+        // must not reach it as stray escape bytes.
+        let (runtime, mut input_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                80, 24, 0, b"", 4,
+            );
+        server
+            .app
+            .terminal_runtimes
+            .insert(runtime_terminal_id, runtime);
+        server.clients.insert(
+            1,
+            ClientConnection::new_with_mode(
+                ClientConnectionMode::TerminalAttach {
+                    terminal_id: terminal_id.clone(),
+                },
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                1,
+                RenderEncoding::TerminalAnsi,
+                None,
+            ),
+        );
+
+        for kind in [
+            protocol::ClientMouseKind::Down(protocol::ClientMouseButton::Left),
+            protocol::ClientMouseKind::Drag(protocol::ClientMouseButton::Left),
+            protocol::ClientMouseKind::Up(protocol::ClientMouseButton::Left),
+            protocol::ClientMouseKind::Moved,
+        ] {
+            server.handle_server_event(ServerEvent::ClientAttachMouse {
+                client_id: 1,
+                kind,
+                position: protocol::ClientMousePosition::Cell { column: 10, row: 5 },
+                geometry: None,
+                modifiers: 0,
+                lines: 1,
+            });
+        }
+        assert!(input_rx.try_recv().is_err());
+    });
+}
+
+#[test]
 fn direct_terminal_pixel_mouse_uses_runtime_tracking_and_coordinates() {
     with_terminal_session_test_server(|server, runtime_terminal_id, terminal_id, _pane_id| {
         let (runtime, mut input_rx) =
