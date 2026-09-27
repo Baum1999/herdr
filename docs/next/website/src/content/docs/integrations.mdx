@@ -99,7 +99,7 @@ To have Herdr resume your agent after a Herdr server restart, report the command
   -- my-agent --resume "$SESSION_ID" --model my-model
 ```
 
-Herdr runs that command in the restored pane's directory. The first word must be a plain command name on `PATH`, not a path. Report the agent's state with `report-agent` first so your source holds the pane, and report the command again whenever the session changes. Herdr keeps it only while your source holds the pane and drops it on release. `[session] resume_agents_on_restore = false` disables it.
+Herdr runs that command in the restored pane's directory. The first word must be a plain command name on `PATH`, not a path, and no argument may contain an apostrophe. Report the agent's state with `report-agent` first so your source holds the pane, and report the command again whenever the session changes. Herdr keeps it only while your source holds the pane and drops it on release. `[session] resume_agents_on_restore = false` disables it.
 
 Herdr cannot identify a custom agent's process, so it treats the pane returning to its idle shell prompt as the agent exiting and clears the agent and its resume command. Still release authority on exit so the pane updates immediately.
 

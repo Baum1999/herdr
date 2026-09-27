@@ -7341,6 +7341,44 @@ fn api_report_agent_stores_valid_resume_argv_and_rejects_invalid() {
     );
 }
 
+#[test]
+fn api_resume_argv_is_ignored_when_its_session_report_is_refused() {
+    let (writer, _control_rx, _render_rx) = test_client_writer();
+    let (mut server, pane_id) = completion_guard_server(writer);
+    let public_pane_id = server.app.public_pane_id(0, pane_id).unwrap();
+    let terminal_id = server.app.state.workspaces[0].tabs[0].panes[&pane_id]
+        .attached_terminal_id
+        .clone();
+    server.handle_internal_event_with_forwarding(AppEvent::AgentProcessDetected {
+        pane_id,
+        agent: crate::detect::Agent::Claude,
+        observed_at: Instant::now(),
+    });
+    let report = |session: &str| {
+        api::schema::Method::PaneReportAgentSession(api::schema::PaneReportAgentSessionParams {
+            pane_id: public_pane_id.clone(),
+            source: "herdr:claude".into(),
+            agent: "claude".into(),
+            seq: None,
+            agent_session_id: Some(session.into()),
+            agent_session_path: None,
+            session_start_source: None,
+            resume_argv: Some(vec!["claude".into(), "--resume".into(), session.into()]),
+        })
+    };
+
+    completion_guard_api_report(&mut server, report("session-a"));
+    completion_guard_api_report(&mut server, report("session-b"));
+
+    let terminal = &server.app.state.terminals[&terminal_id];
+    assert!(terminal
+        .session_ref_is_current(&crate::agent_resume::AgentSessionRef::id("session-a").unwrap()));
+    assert_eq!(
+        terminal.reported_resume().unwrap().argv,
+        vec!["claude", "--resume", "session-a"]
+    );
+}
+
 fn completion_guard_notifications(
     server: &mut HeadlessServer,
     receiver: &std::sync::mpsc::Receiver<Vec<u8>>,

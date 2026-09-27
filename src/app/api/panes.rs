@@ -1561,28 +1561,31 @@ impl App {
         let report_is_newer = self
             .pane_terminal(ws_idx, pane_id)
             .is_some_and(|terminal| terminal.hook_report_is_newer(&params.source, params.seq));
+        let session_ref = crate::agent_resume::session_ref_from_report(
+            &params.source,
+            &agent_label,
+            params.agent_session_id,
+            params.agent_session_path,
+        );
         self.handle_internal_event(crate::events::AppEvent::HookStateReported {
             pane_id,
-            session_ref: crate::agent_resume::session_ref_from_report(
-                &params.source,
-                &agent_label,
-                params.agent_session_id,
-                params.agent_session_path,
-            ),
+            session_ref: session_ref.clone(),
             source: params.source.clone(),
             agent_label: agent_label.clone(),
             state: detect_state_from_api(params.state),
             message: params.message,
             seq: params.seq,
         });
+        let applied =
+            report_is_newer && self.session_report_applied(ws_idx, pane_id, session_ref.as_ref());
         self.report_agent_resume(
             id,
             ws_idx,
             pane_id,
             params.source,
             agent_label,
-            params.seq.filter(|_| report_is_newer),
-            report_is_newer.then_some(params.resume_argv).flatten(),
+            params.seq.filter(|_| applied),
+            applied.then_some(params.resume_argv).flatten(),
         )
     }
 
@@ -1603,14 +1606,15 @@ impl App {
         let report_is_newer = self
             .pane_terminal(ws_idx, pane_id)
             .is_some_and(|terminal| terminal.hook_report_is_newer(&params.source, params.seq));
+        let session_ref = crate::agent_resume::session_ref_from_report(
+            &params.source,
+            &agent_label,
+            params.agent_session_id,
+            params.agent_session_path,
+        );
         self.handle_internal_event(crate::events::AppEvent::AgentSessionReported {
             pane_id,
-            session_ref: crate::agent_resume::session_ref_from_report(
-                &params.source,
-                &agent_label,
-                params.agent_session_id,
-                params.agent_session_path,
-            ),
+            session_ref: session_ref.clone(),
             source: params.source.clone(),
             agent_label: agent_label.clone(),
             seq: params.seq,
@@ -1618,15 +1622,31 @@ impl App {
                 params.session_start_source,
             ),
         });
+        let applied =
+            report_is_newer && self.session_report_applied(ws_idx, pane_id, session_ref.as_ref());
         self.report_agent_resume(
             id,
             ws_idx,
             pane_id,
             params.source,
             agent_label,
-            params.seq.filter(|_| report_is_newer),
-            report_is_newer.then_some(params.resume_argv).flatten(),
+            params.seq.filter(|_| applied),
+            applied.then_some(params.resume_argv).flatten(),
         )
+    }
+
+    /// A resume command belongs to the session it was reported with, so it is
+    /// kept only when Herdr accepted that session.
+    fn session_report_applied(
+        &self,
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+        session_ref: Option<&crate::agent_resume::AgentSessionRef>,
+    ) -> bool {
+        session_ref.is_none_or(|session_ref| {
+            self.pane_terminal(ws_idx, pane_id)
+                .is_some_and(|terminal| terminal.session_ref_is_current(session_ref))
+        })
     }
 
     fn pane_terminal(

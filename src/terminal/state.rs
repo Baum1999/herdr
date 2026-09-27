@@ -1882,8 +1882,13 @@ impl TerminalState {
         })
     }
 
-    pub fn clear_self_reported_agent(&mut self) -> Option<TerminalStateMutation> {
-        if !self.self_reported_agent_active() {
+    /// `observed_at` is when the idle shell was seen; a claim made after that
+    /// belongs to a newer agent and must survive the delayed signal.
+    pub fn clear_self_reported_agent(
+        &mut self,
+        observed_at: Instant,
+    ) -> Option<TerminalStateMutation> {
+        if !self.self_reported_agent_active() || !self.hook_authority_not_newer_than(observed_at) {
             return None;
         }
         let now = Instant::now();
@@ -1911,6 +1916,16 @@ impl TerminalState {
             session_ref_changed: previous_session != current_session,
             agent_released: true,
         })
+    }
+
+    pub fn session_ref_is_current(
+        &self,
+        session_ref: &crate::agent_resume::AgentSessionRef,
+    ) -> bool {
+        self.current_session_identity_for_persistence()
+            .is_some_and(|(_, _, kind, value)| {
+                kind == session_ref.kind && value == session_ref.value
+            })
     }
 
     /// A reporter may own the resume command when it holds the pane, or when it

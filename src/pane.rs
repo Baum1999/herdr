@@ -385,7 +385,10 @@ async fn report_self_reported_agent_shell_return(
     *last_check = Some(now);
     if crate::detect::pane_shell_is_idle(pid) {
         let _ = state_events
-            .send(AppEvent::ReportedAgentShellReturned { pane_id })
+            .send(AppEvent::ReportedAgentShellReturned {
+                pane_id,
+                observed_at: now,
+            })
             .await;
     }
 }

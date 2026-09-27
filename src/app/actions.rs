@@ -1513,8 +1513,13 @@ impl AppState {
                 })
                 .into_iter()
                 .collect(),
-            AppEvent::ReportedAgentShellReturned { pane_id } => self
-                .update_terminal_state(pane_id, |terminal| terminal.clear_self_reported_agent())
+            AppEvent::ReportedAgentShellReturned {
+                pane_id,
+                observed_at,
+            } => self
+                .update_terminal_state(pane_id, |terminal| {
+                    terminal.clear_self_reported_agent(observed_at)
+                })
                 .into_iter()
                 .collect(),
             AppEvent::AgentSessionReported {
@@ -3700,12 +3705,32 @@ mod tests {
         report_custom_agent_with_resume(&mut state, pane_id, &["prime-agent", "--resume", "a"]);
         assert!(state.terminals[&terminal_id].self_reported_agent_active());
 
-        state.handle_app_event(AppEvent::ReportedAgentShellReturned { pane_id });
+        state.handle_app_event(AppEvent::ReportedAgentShellReturned {
+            pane_id,
+            observed_at: std::time::Instant::now(),
+        });
 
         let terminal = &state.terminals[&terminal_id];
         assert_eq!(terminal.effective_agent_label(), None);
         assert!(terminal.reported_resume().is_none());
         assert!(!terminal.self_reported_agent_active());
+    }
+
+    #[test]
+    fn delayed_shell_return_keeps_an_agent_that_claimed_the_pane_afterwards() {
+        let mut state = app_with_workspaces(&["one"]);
+        let (pane_id, terminal_id) = first_pane_terminal(&state);
+        let shell_seen_idle_at = std::time::Instant::now();
+        report_custom_agent_with_resume(&mut state, pane_id, &["prime-agent", "--resume", "b"]);
+
+        state.handle_app_event(AppEvent::ReportedAgentShellReturned {
+            pane_id,
+            observed_at: shell_seen_idle_at,
+        });
+
+        let terminal = &state.terminals[&terminal_id];
+        assert_eq!(terminal.effective_agent_label(), Some("prime-agent"));
+        assert!(terminal.reported_resume().is_some());
     }
 
     #[test]
@@ -3728,7 +3753,10 @@ mod tests {
         });
         assert!(!state.terminals[&terminal_id].self_reported_agent_active());
 
-        state.handle_app_event(AppEvent::ReportedAgentShellReturned { pane_id });
+        state.handle_app_event(AppEvent::ReportedAgentShellReturned {
+            pane_id,
+            observed_at: std::time::Instant::now(),
+        });
 
         assert_eq!(
             state.terminals[&terminal_id].effective_agent_label(),

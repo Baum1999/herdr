@@ -129,7 +129,10 @@ pub enum AppEvent {
         argv: Vec<String>,
     },
     /// A pane held by a self-reported agent is back at its idle shell.
-    ReportedAgentShellReturned { pane_id: PaneId },
+    ReportedAgentShellReturned {
+        pane_id: PaneId,
+        observed_at: std::time::Instant,
+    },
     /// Display-only agent metadata was reported for a pane.
     HookMetadataReported {
         pane_id: PaneId,

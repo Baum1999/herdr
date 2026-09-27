@@ -72,6 +72,11 @@ pub fn validate_resume_argv(argv: &[String]) -> Result<(), String> {
     if argv.iter().any(|arg| arg.chars().any(char::is_control)) {
         return Err("resume_argv must not contain control characters".into());
     }
+    // Restore quotes arguments POSIX-style, which PowerShell reads differently
+    // only when an argument itself contains an apostrophe.
+    if argv.iter().any(|arg| arg.contains('\'')) {
+        return Err("resume_argv must not contain apostrophes".into());
+    }
     let plain_command = !command.is_empty()
         && !command.starts_with('-')
         && command
@@ -391,6 +396,7 @@ mod tests {
             argv(&["prime agent"]),
             argv(&["-prime"]),
             argv(&["prime-agent", "bad\nline"]),
+            argv(&["prime-agent", "--name", "can's session"]),
             vec!["prime-agent".to_string(); MAX_RESUME_ARGS + 1],
             argv(&["prime-agent", &"x".repeat(MAX_RESUME_ARGV_BYTES)]),
         ] {
