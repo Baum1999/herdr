@@ -377,8 +377,17 @@ Detach from direct attach with `ctrl+b q`. Send literal `ctrl+b` with `ctrl+b ct
 terminal, or agent target. It prints the same newline-delimited
 `terminal.frame` and `terminal.closed` records as observe mode. It reads
 newline-delimited JSON commands on stdin: `terminal.input`, `terminal.resize`,
-`terminal.scroll`, and `terminal.release`. One controller can own a terminal at
-a time; use `--takeover` to replace it.
+`terminal.scroll`, `terminal.mouse`, and `terminal.release`. One controller can
+own a terminal at a time; use `--takeover` to replace it.
+`terminal.mouse` sends one mouse event at a zero-based cell of the controller's
+viewport, for example
+`{"type":"terminal.mouse","action":"down","button":"left","column":12,"row":5}`.
+`action` is `down`, `up`, `drag`, or `move`; `button` is `left` (default),
+`right`, or `middle`; `modifiers` is optional and combines Shift = 1, Ctrl = 2,
+and Alt = 4 (default 0). A click is `down` followed by `up`. Herdr encodes the
+event for the application's mouse mode and drops it when the application has
+not enabled mouse reporting, so a plain shell never receives stray input.
+`move` reaches only applications that track all mouse motion.
 `terminal session observe` opens a read-only live terminal stream for a pane,
 terminal, or agent target. It prints newline-delimited JSON `terminal.frame`
 records with base64-encoded ANSI bytes, then a `terminal.closed` record when
