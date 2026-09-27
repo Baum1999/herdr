@@ -1320,6 +1320,47 @@
           ],
           "type": "object"
         },
+        "AgentReportSessionParams": {
+          "description": "Session identity from a reporter that cannot name its pane, such as a hook\nrunning in an agent's shared background server. Herdr attributes it to the\nmatching agent pane whose turn started at the same time, or drops it.",
+          "properties": {
+            "agent": {
+              "type": "string"
+            },
+            "agent_session_id": {
+              "type": "string"
+            },
+            "cwd": {
+              "description": "Working directory of the agent session; limits candidate panes.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "session_start_source": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "source": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "source",
+            "agent",
+            "agent_session_id"
+          ],
+          "type": "object"
+        },
         "AgentSendKeysParams": {
           "properties": {
             "keys": {
@@ -5425,6 +5466,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/AgentWaitParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.report_session",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentReportSessionParams"
             }
           },
           "required": [

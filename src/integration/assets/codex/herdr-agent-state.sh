@@ -3,7 +3,7 @@
 # managed by herdr; reinstalling or updating the integration overwrites this file.
 # add custom hooks beside this file instead of editing it.
 # HERDR_INTEGRATION_ID=codex
-# HERDR_INTEGRATION_VERSION=8
+# HERDR_INTEGRATION_VERSION=9
 
 set -eu
 
@@ -19,7 +19,6 @@ esac
 
 [ "${HERDR_ENV:-}" = "1" ] || exit 0
 [ -n "${HERDR_SOCKET_PATH:-}" ] || exit 0
-[ -n "${HERDR_PANE_ID:-}" ] || exit 0
 command -v python3 >/dev/null 2>&1 || exit 0
 
 HERDR_ACTION="$action" HERDR_HOOK_INPUT_FILE="$hook_input_file" python3 - <<'PY'
@@ -31,11 +30,10 @@ import time
 
 source = "herdr:codex"
 action = os.environ.get("HERDR_ACTION", "")
-pane_id = os.environ.get("HERDR_PANE_ID")
 socket_path = os.environ.get("HERDR_SOCKET_PATH")
 hook_input_file = os.environ.get("HERDR_HOOK_INPUT_FILE")
 
-if not pane_id or not socket_path:
+if not socket_path:
     raise SystemExit(0)
 
 hook_input = {}
@@ -65,23 +63,26 @@ if inherited_session_id and inherited_session_id != agent_session_id:
 session_start_source = hook_input.get("source") if hook_event_name == "SessionStart" else None
 if not isinstance(session_start_source, str) or not session_start_source:
     session_start_source = None
-if agent_session_id:
-    params = {
-        "pane_id": pane_id,
-        "source": source,
-        "agent": "codex",
-        "seq": report_seq,
-        "agent_session_id": agent_session_id,
-    }
-    if session_start_source:
-        params["session_start_source"] = session_start_source
-    request = {
-        "id": request_id,
-        "method": "pane.report_agent_session",
-        "params": params,
-    }
-else:
+if not agent_session_id:
     raise SystemExit(0)
+# Codex may run this hook in a shared background server that inherited another
+# pane's environment, so Herdr picks the pane itself instead of trusting ours.
+params = {
+    "source": source,
+    "agent": "codex",
+    "seq": report_seq,
+    "agent_session_id": agent_session_id,
+}
+if session_start_source:
+    params["session_start_source"] = session_start_source
+cwd = hook_input.get("cwd")
+if isinstance(cwd, str) and cwd:
+    params["cwd"] = cwd
+request = {
+    "id": request_id,
+    "method": "agent.report_session",
+    "params": params,
+}
 
 try:
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)

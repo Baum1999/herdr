@@ -2,13 +2,12 @@
 # managed by herdr; reinstalling or updating the integration overwrites this file.
 # add custom hooks beside this file instead of editing it.
 # HERDR_INTEGRATION_ID=codex
-# HERDR_INTEGRATION_VERSION=8
+# HERDR_INTEGRATION_VERSION=9
 
 param([string]$Action = "")
 
 if ($Action -ne "session") { exit 0 }
 if ($env:HERDR_ENV -ne "1") { exit 0 }
-if ([string]::IsNullOrWhiteSpace($env:HERDR_PANE_ID)) { exit 0 }
 
 $inputText = [Console]::In.ReadToEnd()
 try {
@@ -26,11 +25,12 @@ if (-not [string]::IsNullOrWhiteSpace($env:CODEX_THREAD_ID) -and $env:CODEX_THRE
 
 $seq = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
 $herdr = if ([string]::IsNullOrWhiteSpace($env:HERDR_BIN_PATH)) { "herdr" } else { $env:HERDR_BIN_PATH }
+# Codex may run this hook in a shared background server that inherited another
+# pane's environment, so Herdr picks the pane itself instead of trusting ours.
 try {
     $args = @(
-        "pane",
-        "report-agent-session",
-        $env:HERDR_PANE_ID,
+        "agent",
+        "report-session",
         "--source",
         "herdr:codex",
         "--agent",
@@ -42,6 +42,9 @@ try {
     )
     if ($payload.hook_event_name -eq "SessionStart" -and $payload.source -is [string] -and -not [string]::IsNullOrWhiteSpace($payload.source)) {
         $args += @("--session-start-source", "$($payload.source)")
+    }
+    if ($payload.cwd -is [string] -and -not [string]::IsNullOrWhiteSpace($payload.cwd)) {
+        $args += @("--cwd", "$($payload.cwd)")
     }
     & $herdr @args 2>$null | Out-Null
 } catch {

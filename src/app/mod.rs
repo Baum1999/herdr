@@ -11,7 +11,9 @@ pub(crate) use agents::{AGENT_START_SETTLE_DELAY, MAX_AGENT_START_TIMEOUT};
 mod api;
 #[cfg(test)]
 pub(crate) use api::test_support::exiting_test_command;
+mod agent_session_match;
 mod api_helpers;
+pub(crate) use agent_session_match::UnattributedSessionReport;
 pub(crate) use api_helpers::limit_snapshot_lines;
 mod creation;
 mod custom_commands;
@@ -478,6 +480,7 @@ impl App {
             config_diagnostic,
             toast: None,
             pending_agent_notifications: std::collections::HashMap::new(),
+            agent_session_matcher: Default::default(),
             outer_terminal_focus: None,
             prefix_code,
             prefix_mods,

@@ -3235,6 +3235,17 @@ impl HeadlessServer {
             }
         }
 
+        if self
+            .app
+            .state
+            .next_agent_session_match_deadline()
+            .is_some_and(|deadline| now >= deadline)
+        {
+            self.app
+                .handle_internal_event(crate::events::AppEvent::AgentSessionMatchDue);
+            changed = true;
+        }
+
         if self.has_app_client() {
             self.app.start_git_status_refresh_if_due(now);
         }

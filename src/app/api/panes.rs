@@ -1691,6 +1691,79 @@ impl App {
         encode_success(id, ResponseResult::Ok {})
     }
 
+    pub(super) fn handle_agent_report_session(
+        &mut self,
+        id: String,
+        params: crate::api::schema::AgentReportSessionParams,
+    ) -> String {
+        let Some(agent_label) = normalize_reported_agent_label(&params.agent) else {
+            return invalid_agent(id);
+        };
+        let Some(agent) = crate::detect::parse_agent_label(&agent_label) else {
+            return encode_error(id, "invalid_agent", "agent is not a supported agent");
+        };
+        let Some(session_ref) = crate::agent_resume::session_ref_from_report(
+            &params.source,
+            &agent_label,
+            Some(params.agent_session_id),
+            None,
+        ) else {
+            return encode_error(
+                id,
+                "invalid_agent_session",
+                "source cannot report this agent's session or session id is invalid",
+            );
+        };
+        let eligible = self.agent_panes_in_cwd(agent, params.cwd.as_deref());
+        self.handle_internal_event(crate::events::AppEvent::UnattributedAgentSessionReported(
+            crate::app::UnattributedSessionReport {
+                agent,
+                eligible,
+                source: params.source,
+                agent_label,
+                seq: params.seq,
+                session_ref,
+                session_start_source: crate::agent_resume::normalize_session_start_source(
+                    params.session_start_source,
+                ),
+            },
+        ));
+        encode_success(id, ResponseResult::Ok {})
+    }
+
+    fn agent_panes_in_cwd(&self, agent: crate::detect::Agent, cwd: Option<&str>) -> Vec<PaneId> {
+        let wanted = cwd.map(|cwd| comparable_path(std::path::Path::new(cwd)));
+        let mut panes = Vec::new();
+        for ws in &self.state.workspaces {
+            for tab in &ws.tabs {
+                for (pane_id, pane) in &tab.panes {
+                    let runs_agent = self
+                        .state
+                        .terminals
+                        .get(&pane.attached_terminal_id)
+                        .is_some_and(|terminal| terminal.detected_agent == Some(agent));
+                    if !runs_agent {
+                        continue;
+                    }
+                    let in_cwd = wanted.as_ref().is_none_or(|wanted| {
+                        tab.foreground_cwd_for_pane(*pane_id, &self.terminal_runtimes)
+                            .into_iter()
+                            .chain(tab.cwd_for_pane(
+                                *pane_id,
+                                &self.state.terminals,
+                                &self.terminal_runtimes,
+                            ))
+                            .any(|cwd| comparable_path(&cwd) == *wanted)
+                    });
+                    if in_cwd {
+                        panes.push(*pane_id);
+                    }
+                }
+            }
+        }
+        panes
+    }
+
     pub(super) fn handle_pane_report_metadata(
         &mut self,
         id: String,
@@ -2296,6 +2369,10 @@ fn split_path_id(idx: usize, path: &[bool]) -> String {
         .collect::<Vec<_>>()
         .join("");
     format!("split_{idx}_{path}")
+}
+
+fn comparable_path(path: &std::path::Path) -> std::path::PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn invalid_agent(id: String) -> String {

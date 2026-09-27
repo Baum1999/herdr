@@ -22,6 +22,23 @@ pub struct AgentSendKeysParams {
     pub keys: Vec<String>,
 }
 
+/// Session identity from a reporter that cannot name its pane, such as a hook
+/// running in an agent's shared background server. Herdr attributes it to the
+/// matching agent pane whose turn started at the same time, or drops it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentReportSessionParams {
+    pub source: String,
+    pub agent: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
+    pub agent_session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_start_source: Option<String>,
+    /// Working directory of the agent session; limits candidate panes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentWaitParams {
     pub target: String,

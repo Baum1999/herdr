@@ -446,6 +446,19 @@ fn agent_command() -> Command {
                         .action(ArgAction::SetTrue),
                 ),
         )
+        .subcommand(
+            Command::new("report-session")
+                .about("Report agent session identity without naming a pane")
+                .arg(option("source", "ID").required(true))
+                .arg(option("agent", "LABEL").required(true))
+                .arg(option("agent-session-id", "ID").required(true))
+                .arg(option("seq", "N"))
+                .arg(option("session-start-source", "SOURCE"))
+                .arg(path_option("cwd", "PATH"))
+                .after_help(
+                    "For hooks that cannot trust their pane environment. Herdr attributes the session to the agent pane whose turn started at the same time.",
+                ),
+        )
 }
 
 pub(super) fn agent_kind_values() -> Vec<&'static str> {

@@ -1456,20 +1456,24 @@ impl AppState {
                 visible_working,
                 process_exited,
                 observed_at,
-            } => self
-                .update_terminal_state(pane_id, |terminal| {
-                    Some(terminal.set_detected_state_with_screen_signals_at(
-                        agent,
-                        state,
-                        visible_blocker,
-                        false,
-                        visible_working,
-                        process_exited,
-                        observed_at,
-                    ))
-                })
-                .into_iter()
-                .collect(),
+            } => {
+                let updates = self
+                    .update_terminal_state(pane_id, |terminal| {
+                        Some(terminal.set_detected_state_with_screen_signals_at(
+                            agent,
+                            state,
+                            visible_blocker,
+                            false,
+                            visible_working,
+                            process_exited,
+                            observed_at,
+                        ))
+                    })
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                self.observe_agent_turn_starts(&updates, observed_at);
+                updates
+            }
             AppEvent::HookStateReported {
                 pane_id,
                 source,
@@ -1541,6 +1545,10 @@ impl AppState {
                 })
                 .into_iter()
                 .collect(),
+            AppEvent::UnattributedAgentSessionReported(report) => {
+                self.report_unattributed_agent_session(report, Instant::now())
+            }
+            AppEvent::AgentSessionMatchDue => self.decide_due_agent_session_reports(Instant::now()),
             AppEvent::HookMetadataReported {
                 pane_id,
                 source,
@@ -1638,7 +1646,11 @@ impl AppState {
         }
     }
 
-    fn update_terminal_state<F>(&mut self, pane_id: PaneId, update: F) -> Option<PaneStateUpdate>
+    pub(super) fn update_terminal_state<F>(
+        &mut self,
+        pane_id: PaneId,
+        update: F,
+    ) -> Option<PaneStateUpdate>
     where
         F: FnOnce(&mut crate::terminal::TerminalState) -> Option<TerminalStateMutation>,
     {

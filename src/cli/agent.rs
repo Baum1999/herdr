@@ -27,6 +27,7 @@ pub(super) fn run_agent_command(args: &[String]) -> std::io::Result<i32> {
         "attach" => agent_attach(&args[1..]),
         "start" => agent_start(&args[1..]),
         "explain" => agent_explain(&args[1..]),
+        "report-session" => agent_report_session(&args[1..]),
         "help" | "--help" | "-h" => {
             print_agent_help();
             Ok(0)
@@ -36,6 +37,55 @@ pub(super) fn run_agent_command(args: &[String]) -> std::io::Result<i32> {
             Ok(2)
         }
     }
+}
+
+fn agent_report_session(args: &[String]) -> std::io::Result<i32> {
+    const OPTIONS: &[&str] = &[
+        "--source",
+        "--agent",
+        "--agent-session-id",
+        "--seq",
+        "--session-start-source",
+        "--cwd",
+    ];
+    let args = super::expand_equals_args(args, OPTIONS);
+    let mut values: std::collections::HashMap<&str, String> = std::collections::HashMap::new();
+    let mut index = 0;
+    while index < args.len() {
+        let option = args[index].as_str();
+        let Some(name) = OPTIONS.iter().find(|name| **name == option) else {
+            eprintln!("unknown option: {option}");
+            return Ok(2);
+        };
+        let Some(value) = args.get(index + 1) else {
+            eprintln!("missing value for {option}");
+            return Ok(2);
+        };
+        values.insert(name, value.clone());
+        index += 2;
+    }
+    let (Some(source), Some(agent), Some(agent_session_id)) = (
+        values.remove("--source"),
+        values.remove("--agent"),
+        values.remove("--agent-session-id"),
+    ) else {
+        eprintln!("usage: herdr agent report-session --source ID --agent LABEL --agent-session-id ID [--seq N] [--session-start-source SOURCE] [--cwd PATH]");
+        return Ok(2);
+    };
+    let seq = match values.remove("--seq") {
+        Some(value) => Some(super::parse_u64_flag("--seq", &value)?),
+        None => None,
+    };
+    super::send_ok_request(Method::AgentReportSession(
+        crate::api::schema::AgentReportSessionParams {
+            source,
+            agent,
+            seq,
+            agent_session_id,
+            session_start_source: values.remove("--session-start-source"),
+            cwd: values.remove("--cwd"),
+        },
+    ))
 }
 
 fn agent_explain(args: &[String]) -> std::io::Result<i32> {
@@ -947,6 +997,7 @@ fn print_agent_help() {
     eprintln!(
         "  herdr agent explain --file PATH --agent LABEL [--json|--format text|json] [--verbose]"
     );
+    eprintln!("  herdr agent report-session --source ID --agent LABEL --agent-session-id ID [--seq N] [--session-start-source SOURCE] [--cwd PATH]");
     eprintln!("  targets accept unique agent names and pane ids that currently host agents");
     eprintln!("  kinds: {}", super::spec::agent_kind_values().join("|"));
 }

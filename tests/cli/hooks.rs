@@ -189,12 +189,17 @@ fn claude_hook_ignores_cursor_compatibility_payloads() {
 fn codex_hook_reports_persisted_root_session_and_ignores_ephemeral_or_nested_sessions() {
     let request = run_codex_hook(
         "session",
-        r#"{"hook_event_name":"SessionStart","session_id":"codex-session","transcript_path":"/tmp/codex-session.jsonl"}"#,
+        r#"{"hook_event_name":"SessionStart","session_id":"codex-session","transcript_path":"/tmp/codex-session.jsonl","cwd":"/work/repo","source":"startup"}"#,
     )
     .expect("codex hook should report session identity");
 
-    assert_eq!(request["method"], "pane.report_agent_session");
+    // The hook may run in a shared daemon with another pane's environment,
+    // so it must not name a pane and lets Herdr attribute the session.
+    assert_eq!(request["method"], "agent.report_session");
+    assert!(request["params"].get("pane_id").is_none());
     assert_eq!(request["params"]["agent_session_id"], "codex-session");
+    assert_eq!(request["params"]["cwd"], "/work/repo");
+    assert_eq!(request["params"]["session_start_source"], "startup");
     assert!(request["params"].get("state").is_none());
 
     let matching_request = run_shell_hook_with_env(

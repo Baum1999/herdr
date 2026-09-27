@@ -1440,6 +1440,18 @@ impl TerminalState {
         self.persisted_agent_session = Some(session);
     }
 
+    pub(crate) fn owns_agent_session(
+        &self,
+        agent_label: &str,
+        session_ref: &crate::agent_resume::AgentSessionRef,
+    ) -> bool {
+        self.persisted_agent_session
+            .as_ref()
+            .is_some_and(|session| {
+                session.agent == agent_label && &session.session_ref == session_ref
+            })
+    }
+
     pub fn set_managed_agent_launch_session(
         &mut self,
         session: crate::agent_resume::PersistedAgentSession,

@@ -133,6 +133,11 @@ pub enum AppEvent {
         pane_id: PaneId,
         observed_at: std::time::Instant,
     },
+    /// Agent session identity was reported by a sender that cannot name its
+    /// pane; the owning pane is chosen by turn timing.
+    UnattributedAgentSessionReported(crate::app::UnattributedSessionReport),
+    /// A pending unattributed agent session report's matching window closed.
+    AgentSessionMatchDue,
     /// Display-only agent metadata was reported for a pane.
     HookMetadataReported {
         pane_id: PaneId,
