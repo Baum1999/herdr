@@ -70,7 +70,7 @@ use terminal_geometry::{
 };
 use terminal_geometry::{
     host_cell_size_query_required, initial_terminal_geometry, query_host_cell_size,
-    query_host_terminal_theme, resize_poll_loop, should_query_host_terminal_theme,
+    query_host_terminal_theme, resize_poll_loop,
 };
 #[cfg(unix)]
 use terminal_geometry::{reported_cell_size_from_events, store_reported_cell_size};
@@ -517,8 +517,7 @@ async fn run_client_loop(
     let mut endpoint_commands = endpoint_commands::EndpointCommands::default();
 
     // Spawn the stdin reader thread.
-    let will_query_host_terminal_theme =
-        state.attach_escape.is_none() && should_query_host_terminal_theme();
+    let will_query_host_terminal_theme = state.attach_escape.is_none();
     let host_theme_query_pending = Arc::new(AtomicU32::new(0));
     let stdin_host_theme_query_pending = host_theme_query_pending.clone();
     // Terminals behind ConPTY report no pixel size through the ioctl, so ask the
@@ -555,9 +554,9 @@ async fn run_client_loop(
         );
     });
 
+    #[cfg(unix)]
     if will_query_host_terminal_theme {
         query_host_terminal_theme();
-        #[cfg(not(windows))]
         if state.shell.is_some() {
             query_host_terminal_appearance();
         }
@@ -1191,9 +1190,9 @@ async fn run_client_loop(
                 cell_height_px,
                 pixel_geometry_exact,
             ) => {
-                // Palette updates through OSC do not necessarily produce a color-scheme
-                // notification. Re-query on redraw, including SIGWINCH without a resize,
-                // so desktop theme switchers can refresh the existing panes in place.
+                // On Unix, palette changes may lack a color-scheme notification.
+                // Re-query on redraw, including SIGWINCH without a resize.
+                #[cfg(unix)]
                 if will_query_host_terminal_theme {
                     host_theme_query_pending.fetch_add(1, Ordering::AcqRel);
                     query_host_terminal_theme();
