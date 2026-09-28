@@ -3734,13 +3734,14 @@ mod tests {
     fn windows_process_command_line_reads_spawned_process_marker() {
         let shell =
             std::env::var_os("ComSpec").unwrap_or_else(|| r"C:\Windows\System32\cmd.exe".into());
+        // `rem` keeps the marker inside cmd.exe's own command line without
+        // becoming a target for `ping`, so the process stays alive for the read.
         let mut child = Command::new(shell)
             .args([
                 "/D",
                 "/Q",
                 "/C",
-                "ping -n 11 127.0.0.1 > NUL",
-                "unique-cmdline-marker",
+                "ping -n 11 127.0.0.1 > NUL & rem unique-cmdline-marker",
             ])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
