@@ -1781,26 +1781,23 @@ fn print_running_session_update_outcomes(
         return;
     }
 
+    let kept: Vec<KeptServer<'_>> = outcomes
+        .iter()
+        .filter(|outcome| outcome.outcome == RunningServerUpdateOutcome::CompatibleServerKept)
+        .map(|outcome| KeptServer {
+            label: &outcome.session_label,
+            version: version_label(outcome.server_version.as_deref()),
+            stop_command: &outcome.stop_command,
+            attach_command: outcome.attach_command.as_deref(),
+        })
+        .collect();
+    for line in kept_server_notice_lines(&kept, release.label()) {
+        eprintln!("{line}");
+    }
+
     for outcome in outcomes {
         match outcome.outcome {
-            RunningServerUpdateOutcome::CompatibleServerKept => {
-                eprintln!(
-                    "{} {} kept running server v{}.",
-                    outcome.target_noun,
-                    outcome.session_label,
-                    version_label(outcome.server_version.as_deref())
-                );
-                match &outcome.attach_command {
-                    Some(command) => eprintln!(
-                        "Run `{command}` to reconnect with the updated client. Restart the server later only if you need server-side changes from {}.",
-                        release.label()
-                    ),
-                    None => eprintln!(
-                        "Reconnect with the same socket override to use the updated client. Restart the server later only if you need server-side changes from {}.",
-                        release.label()
-                    ),
-                }
-            }
+            RunningServerUpdateOutcome::CompatibleServerKept => {}
             RunningServerUpdateOutcome::LiveHandoffComplete => {
                 if let Some(command) = &outcome.attach_command {
                     eprintln!(
@@ -2190,6 +2187,7 @@ pub fn self_update(options: SelfUpdateOptions) -> Result<Version, String> {
             "Open a new terminal, or reconnect SSH, then start Herdr again to use the updated client. Running servers remain active; restart them later only if you need server-side changes from {}.",
             release.label()
         );
+        print_saved_machine_update_notice();
     }
 
     #[cfg(not(windows))]
@@ -2224,9 +2222,108 @@ pub fn self_update(options: SelfUpdateOptions) -> Result<Version, String> {
         print_outdated_integration_notice_with_updated_binary(&updated_exe);
 
         print_running_session_update_outcomes(&server_update_outcomes, &release);
+        print_saved_machine_update_notice();
     }
 
     Ok(release.version)
+}
+
+fn print_saved_machine_update_notice() {
+    let profiles = match crate::client::endpoint::EndpointCatalog::load_profiles() {
+        Ok(profiles) => profiles,
+        Err(error) => {
+            tracing::debug!(%error, "skipping saved machine update notice");
+            return;
+        }
+    };
+    for line in saved_machine_update_notice_lines(&profiles) {
+        eprintln!("{line}");
+    }
+}
+
+fn saved_machine_update_notice_lines(
+    profiles: &[crate::client::endpoint::SavedSshEndpoint],
+) -> Vec<String> {
+    let mut targets: Vec<&str> = Vec::new();
+    let mut labels: Vec<&str> = Vec::new();
+    for profile in profiles.iter().filter(|profile| profile.enabled) {
+        if !targets.contains(&profile.target.as_str()) {
+            targets.push(&profile.target);
+            labels.push(&profile.label);
+        }
+    }
+    if labels.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = vec![
+        String::new(),
+        "your SSH machines run their own herdr and may be older:".to_string(),
+    ];
+    lines.extend(labels.into_iter().map(|label| format!("  {label}")));
+    lines.push(
+        "run `herdr update` on each one. it will tell you what to restart there.".to_string(),
+    );
+    lines
+}
+
+#[cfg(not(windows))]
+struct KeptServer<'a> {
+    label: &'a str,
+    version: &'a str,
+    stop_command: &'a str,
+    attach_command: Option<&'a str>,
+}
+
+#[cfg(not(windows))]
+fn kept_server_notice_lines(kept: &[KeptServer<'_>], release_label: &str) -> Vec<String> {
+    match kept {
+        [] => Vec::new(),
+        [server] => {
+            let restart = match server.attach_command {
+                Some(attach) => format!(
+                    "when your agents are idle, run `{}`, then `{attach}`.",
+                    server.stop_command
+                ),
+                None => format!(
+                    "when your agents are idle, run `{}`, then restart herdr with the same socket override.",
+                    server.stop_command
+                ),
+            };
+            vec![
+                String::new(),
+                format!(
+                    "your running server is still v{}. everything keeps working,",
+                    server.version
+                ),
+                format!("but server fixes in v{release_label} apply only after it restarts."),
+                restart,
+                "this closes running panes and their agents.".to_string(),
+            ]
+        }
+        servers => {
+            let width = servers
+                .iter()
+                .map(|server| server.label.chars().count())
+                .max()
+                .unwrap_or(0);
+            let mut lines = vec![
+                String::new(),
+                "your running servers are still older. everything keeps working,".to_string(),
+                format!("but server fixes in v{release_label} apply only after each one restarts:"),
+            ];
+            lines.extend(servers.iter().map(|server| {
+                format!(
+                    "  {:<width$}  v{}  stop with `{}`",
+                    server.label, server.version, server.stop_command
+                )
+            }));
+            lines.push(
+                "when your agents are idle, stop a server and start herdr again.".to_string(),
+            );
+            lines.push("this closes its panes and their agents.".to_string());
+            lines
+        }
+    }
 }
 
 fn print_outdated_integration_notice_with_updated_binary(updated_exe: &Path) {
@@ -2406,6 +2503,92 @@ mod tests {
     };
     use std::sync::{Mutex, OnceLock};
     use std::thread;
+
+    fn saved_machine(
+        label: &str,
+        target: &str,
+        enabled: bool,
+    ) -> crate::client::endpoint::SavedSshEndpoint {
+        let mut profile =
+            crate::client::endpoint::SavedSshEndpoint::new(label, target, "default").unwrap();
+        profile.enabled = enabled;
+        profile
+    }
+
+    #[test]
+    fn saved_machine_notice_lists_enabled_machines_once_per_target() {
+        let profiles = [
+            saved_machine("rohan", "rohan", true),
+            saved_machine("rohan/agents", "rohan", true),
+            saved_machine("off", "offbox", false),
+            saved_machine("workbox", "dev@workbox", true),
+        ];
+
+        assert_eq!(
+            saved_machine_update_notice_lines(&profiles),
+            [
+                "",
+                "your SSH machines run their own herdr and may be older:",
+                "  rohan",
+                "  workbox",
+                "run `herdr update` on each one. it will tell you what to restart there.",
+            ]
+        );
+    }
+
+    #[test]
+    fn saved_machine_notice_is_empty_without_enabled_machines() {
+        assert!(saved_machine_update_notice_lines(&[]).is_empty());
+        assert!(
+            saved_machine_update_notice_lines(&[saved_machine("off", "offbox", false)]).is_empty()
+        );
+    }
+
+    #[test]
+    fn kept_server_notice_names_the_session_restart_commands() {
+        let default = KeptServer {
+            label: "default",
+            version: "0.9.1",
+            stop_command: "herdr server stop",
+            attach_command: Some("herdr"),
+        };
+        assert_eq!(
+            kept_server_notice_lines(&[default], "0.10.0"),
+            [
+                "",
+                "your running server is still v0.9.1. everything keeps working,",
+                "but server fixes in v0.10.0 apply only after it restarts.",
+                "when your agents are idle, run `herdr server stop`, then `herdr`.",
+                "this closes running panes and their agents.",
+            ]
+        );
+
+        let work = KeptServer {
+            label: "work",
+            version: "0.9.0",
+            stop_command: "herdr session stop work",
+            attach_command: Some("herdr session attach work"),
+        };
+        let default = KeptServer {
+            label: "default",
+            version: "0.9.1",
+            stop_command: "herdr server stop",
+            attach_command: Some("herdr"),
+        };
+        assert_eq!(
+            kept_server_notice_lines(&[default, work], "0.10.0"),
+            [
+                "",
+                "your running servers are still older. everything keeps working,",
+                "but server fixes in v0.10.0 apply only after each one restarts:",
+                "  default  v0.9.1  stop with `herdr server stop`",
+                "  work     v0.9.0  stop with `herdr session stop work`",
+                "when your agents are idle, stop a server and start herdr again.",
+                "this closes its panes and their agents.",
+            ]
+        );
+        assert!(kept_server_notice_lines(&[], "0.10.0").is_empty());
+    }
 
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
