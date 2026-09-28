@@ -2198,21 +2198,27 @@ fn read_process_command_line(process: HANDLE) -> Option<String> {
                 &mut required,
             )
         };
+        // These three statuses all mean the command line grew between the probe
+        // and the read. Some data was written; retry once with the larger buffer
+        // the call just reported. They are negative as `NTSTATUS`, so they must
+        // be checked before the failure test below.
+        let grew = status == STATUS_BUFFER_OVERFLOW
+            || status == STATUS_BUFFER_TOO_SMALL
+            || status == STATUS_INFO_LENGTH_MISMATCH;
+        if grew {
+            buffer = vec![0_u8; required as usize];
+            continue;
+        }
         if status < 0 {
             return None;
         }
-        // `STATUS_BUFFER_OVERFLOW` means the command line grew between the size
-        // probe and the read. Some data was written; retry once with the larger
-        // buffer the call just reported.
-        if status != STATUS_BUFFER_OVERFLOW {
-            break;
-        }
-        buffer = vec![0_u8; required as usize];
+        break;
     }
 
     // SAFETY: on success the kernel wrote a UNICODE_STRING followed by its
-    // UTF-16 contents into `buffer`.
-    let unicode = unsafe { buffer.as_ptr().cast::<UNICODE_STRING>().read() };
+    // UTF-16 contents into `buffer`. A `Vec<u8>` only guarantees byte
+    // alignment, so read the header unaligned.
+    let unicode = unsafe { buffer.as_ptr().cast::<UNICODE_STRING>().read_unaligned() };
     let length = usize::from(unicode.Length);
     // A short command line leaves `Length` inside the header itself; guard
     // against reading a malformed header as string data.
@@ -3706,6 +3712,26 @@ mod tests {
 
     #[test]
     fn windows_process_command_line_reads_live_process_with_limited_access() {
+        // The point of the fix: the command line must be readable from a handle
+        // that does not request `PROCESS_VM_READ`. Verification against a
+        // process that actually denies that access needs a hardened host, which
+        // this suite cannot provide.
+        let handle = super::ProcessHandle::open(
+            std::process::id(),
+            super::PROCESS_QUERY_LIMITED_INFORMATION,
+        )
+        .expect("open self with limited access");
+
+        let command_line =
+            super::read_process_command_line(handle.0).expect("command line must be readable");
+        assert!(
+            !command_line.is_empty(),
+            "command line for the test process must not be empty"
+        );
+    }
+
+    #[test]
+    fn windows_process_command_line_reads_spawned_process_marker() {
         let shell =
             std::env::var_os("ComSpec").unwrap_or_else(|| r"C:\Windows\System32\cmd.exe".into());
         let mut child = Command::new(shell)
