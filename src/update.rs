@@ -2275,31 +2275,34 @@ struct KeptServer<'a> {
 }
 
 #[cfg(not(windows))]
+impl KeptServer<'_> {
+    fn reconnect(&self) -> String {
+        match self.attach_command {
+            Some(attach) => format!("`{attach}`"),
+            None => "herdr with the same socket override".to_string(),
+        }
+    }
+}
+
+#[cfg(not(windows))]
 fn kept_server_notice_lines(kept: &[KeptServer<'_>], release_label: &str) -> Vec<String> {
     match kept {
         [] => Vec::new(),
-        [server] => {
-            let restart = match server.attach_command {
-                Some(attach) => format!(
-                    "when your agents are idle, run `{}`, then `{attach}`.",
-                    server.stop_command
-                ),
-                None => format!(
-                    "when your agents are idle, run `{}`, then restart herdr with the same socket override.",
-                    server.stop_command
-                ),
-            };
-            vec![
-                String::new(),
-                format!(
-                    "your running server is still v{}. everything keeps working,",
-                    server.version
-                ),
-                format!("but server fixes in v{release_label} apply only after it restarts."),
-                restart,
-                "this closes running panes and their agents.".to_string(),
-            ]
-        }
+        [server] => vec![
+            String::new(),
+            format!(
+                "your running server is still v{}. run {} to reconnect; everything keeps working.",
+                server.version,
+                server.reconnect()
+            ),
+            format!("server fixes in v{release_label} apply only after it restarts."),
+            format!(
+                "when your agents are idle, run `{}`, then {}.",
+                server.stop_command,
+                server.reconnect()
+            ),
+            "this closes running panes and their agents.".to_string(),
+        ],
         servers => {
             let width = servers
                 .iter()
@@ -2308,19 +2311,23 @@ fn kept_server_notice_lines(kept: &[KeptServer<'_>], release_label: &str) -> Vec
                 .unwrap_or(0);
             let mut lines = vec![
                 String::new(),
-                "your running servers are still older. everything keeps working,".to_string(),
-                format!("but server fixes in v{release_label} apply only after each one restarts:"),
+                "your running servers are still older. reconnect as usual; everything keeps working."
+                    .to_string(),
+                format!("server fixes in v{release_label} apply only after each one restarts:"),
             ];
             lines.extend(servers.iter().map(|server| {
                 format!(
-                    "  {:<width$}  v{}  stop with `{}`",
-                    server.label, server.version, server.stop_command
+                    "  {:<width$}  v{}  `{}`, then {}",
+                    server.label,
+                    server.version,
+                    server.stop_command,
+                    server.reconnect()
                 )
             }));
             lines.push(
-                "when your agents are idle, stop a server and start herdr again.".to_string(),
+                "restart one when its agents are idle. this closes its panes and their agents."
+                    .to_string(),
             );
-            lines.push("this closes its panes and their agents.".to_string());
             lines
         }
     }
@@ -2556,8 +2563,8 @@ mod tests {
             kept_server_notice_lines(&[default], "0.10.0"),
             [
                 "",
-                "your running server is still v0.9.1. everything keeps working,",
-                "but server fixes in v0.10.0 apply only after it restarts.",
+                "your running server is still v0.9.1. run `herdr` to reconnect; everything keeps working.",
+                "server fixes in v0.10.0 apply only after it restarts.",
                 "when your agents are idle, run `herdr server stop`, then `herdr`.",
                 "this closes running panes and their agents.",
             ]
@@ -2579,15 +2586,26 @@ mod tests {
             kept_server_notice_lines(&[default, work], "0.10.0"),
             [
                 "",
-                "your running servers are still older. everything keeps working,",
-                "but server fixes in v0.10.0 apply only after each one restarts:",
-                "  default  v0.9.1  stop with `herdr server stop`",
-                "  work     v0.9.0  stop with `herdr session stop work`",
-                "when your agents are idle, stop a server and start herdr again.",
-                "this closes its panes and their agents.",
+                "your running servers are still older. reconnect as usual; everything keeps working.",
+                "server fixes in v0.10.0 apply only after each one restarts:",
+                "  default  v0.9.1  `herdr server stop`, then `herdr`",
+                "  work     v0.9.0  `herdr session stop work`, then `herdr session attach work`",
+                "restart one when its agents are idle. this closes its panes and their agents.",
             ]
         );
         assert!(kept_server_notice_lines(&[], "0.10.0").is_empty());
+
+        let socket_override = KeptServer {
+            label: "/tmp/herdr.sock",
+            version: "0.9.1",
+            stop_command: "herdr server stop",
+            attach_command: None,
+        };
+        let lines = kept_server_notice_lines(&[socket_override], "0.10.0");
+        assert_eq!(
+            lines[3],
+            "when your agents are idle, run `herdr server stop`, then herdr with the same socket override."
+        );
     }
 
     fn env_lock() -> &'static Mutex<()> {
