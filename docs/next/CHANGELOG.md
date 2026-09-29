@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.9.2] - 2026-09-29
+
 ### Breaking Changes
 - The Herdr-specific pane graphics API is gone. `pane.graphics.info`, `set`, `clear`, and `stream` now return `unknown_method`. Apps show images by writing standard Kitty graphics to their terminal, which Herdr renders natively. (#4561)
 
