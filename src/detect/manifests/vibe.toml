@@ -1,0 +1,21 @@
+id = "vibe"
+version = "2026.09.30.1"
+min_engine_version = 1
+updated_at = "2026-09-30T00:00:00Z"
+aliases = ["mistral-vibe"]
+
+[[rules]]
+id = "tool_permission_approval"
+state = "blocked"
+priority = 300
+region = "whole_recent"
+visible_blocker = true
+contains = ["permission for the", "allow once", "deny"]
+
+[[rules]]
+id = "interrupt_hint_working"
+state = "working"
+priority = 100
+region = "bottom_non_empty_lines(10)"
+visible_working = true
+contains = ["to interrupt)"]
